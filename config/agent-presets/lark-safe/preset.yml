@@ -1,0 +1,2 @@
+name: 飞书安全模式
+description: 可只读查看 workspace 文件并搜索内容，不提供 Shell、写文件、Skills 或子代理。

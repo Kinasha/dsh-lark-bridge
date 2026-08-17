@@ -1,0 +1,13 @@
+# DSH Host-plane Feishu transport. Install this package into the same profile
+# that provides apiProxy (normally the Web profile).
+
+- insert:
+    - id: dsh-lark-bridge
+      name: '@aiden-ai/dsh-lark-bridge'
+      inject: [apiProxy]
+      config:
+        enabled: !!js process.env.DSH_LARK_ENABLED !== '0'
+        workspacePath: !!js process.env.DSH_LARK_WORKSPACE || process.cwd()
+        workspaceTitle: !!js process.env.DSH_LARK_WORKSPACE_TITLE
+        agentPreset: !!js process.env.DSH_LARK_AGENT_PRESET || 'dsh-lark-safe'
+        installBundledPreset: true

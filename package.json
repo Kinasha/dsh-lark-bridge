@@ -1,0 +1,92 @@
+{
+  "name": "@aiden-ai/dsh-lark-bridge",
+  "version": "0.0.7",
+  "private": false,
+  "type": "module",
+  "description": "Feishu/Lark message bridge for DeepSeek Harness",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kinasha/dsh-lark-bridge.git"
+  },
+  "homepage": "https://github.com/Kinasha/dsh-lark-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/Kinasha/dsh-lark-bridge/issues"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "feishu",
+    "lark",
+    "agent"
+  ],
+  "publishConfig": {
+    "registry": "https://bnpm.byted.org"
+  },
+  "main": "./dist/src/plugin.js",
+  "types": "./dist/src/plugin.d.ts",
+  "bin": {
+    "dsh-lark-bridge": "dist/src/plugin-cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/src/plugin.d.ts",
+      "default": "./dist/src/plugin.js"
+    }
+  },
+  "files": [
+    "dist/src/api-proxy-client.*",
+    "dist/src/bridge.*",
+    "dist/src/config.*",
+    "dist/src/cot.*",
+    "dist/src/dsh-client.*",
+    "dist/src/lark.*",
+    "dist/src/plugin.*",
+    "dist/src/plugin-cli.*",
+    "dist/src/preset-installer.*",
+    "dist/src/plugins/read-only-files.*",
+    "config/agent-presets/lark-safe",
+    "dsh.bundle.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./dsh.bundle.patch.yml"
+    }
+  },
+  "scripts": {
+    "predoctor": "npm run build",
+    "prerun": "npm run build",
+    "preweb": "npm run build",
+    "prestart": "npm run build",
+    "pretest": "npm run build",
+    "prepack": "npm run build",
+    "prepare": "npm run build",
+    "build": "tsc -p tsconfig.json && node -e \"require('node:fs').chmodSync('dist/src/plugin-cli.js', 0o755)\"",
+    "test": "tsx --test tests/*.test.ts",
+    "doctor": "tsx src/cli.ts doctor",
+    "web": "tsx src/cli.ts web",
+    "run": "tsx src/cli.ts run",
+    "start": "tsx src/cli.ts start"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "3.18.1",
+    "@larksuiteoapi/node-sdk": "1.73.0",
+    "dotenv": "^17.2.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@deepseek-ai/dsh": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-fs": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-host-apiproxy": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-system-prompt": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-tool-fs-search": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
+    "@types/node": "^24.2.1",
+    "tsx": "^4.20.3",
+    "typescript": "^5.9.2"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
