@@ -18,10 +18,12 @@
     complete: true
     includeRuntimeContext: true
 
-- id: read-only-files
-  name: './read-only-files.js'
-
 - id: tool-fs-search
   name: '@deepseek-ai/dsh-tool-fs-search'
   config:
     sampleOverCapGlobResults: false
+
+# Load the policy after search so its post-execute value filter runs before the
+# search plugin's outer spill formatter in the Cordis waterfall.
+- id: read-only-files
+  name: './read-only-files.js'

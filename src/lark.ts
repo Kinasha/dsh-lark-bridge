@@ -5,14 +5,15 @@ import {
   LoggerLevel,
   WSClient,
   normalize,
+  withUserAccessToken,
   type BotIdentity,
   type Logger as LarkSdkLogger,
   type RawMessageEvent,
 } from "@larksuiteoapi/node-sdk";
-import {
-  LarkCotGateway,
-  type CotMessage,
-} from "./cot.js";
+import { LarkCotGateway, type CotMessage } from "./cot.js";
+import { renderLarkMarkdown } from "./lark-markdown.js";
+import type { LarkOAuthTokenApi } from "./lark-user-auth.js";
+import { silentLogger, type SemanticLogger } from "./logger.js";
 
 const DEFAULT_READINESS_TIMEOUT_MS = 30_000;
 const DEFAULT_READINESS_POLL_INTERVAL_MS = 100;
@@ -29,6 +30,7 @@ export interface LarkMessage {
   threadId?: string;
   chatId: string;
   chatType: "p2p" | "group";
+  mentionedBot?: boolean;
   senderId: string;
   messageType: string;
   content: string;
@@ -44,11 +46,14 @@ export interface LarkReplyResult {
   threadId?: string;
 }
 
-export interface LarkTransportLogger {
-  info(event: string, fields?: Record<string, unknown>): void;
-  warn(event: string, fields?: Record<string, unknown>): void;
-  error(event: string, fields?: Record<string, unknown>): void;
+export class LarkUserAuthorizationUnavailableError extends Error {
+  constructor(message = "Lark user authorization is unavailable") {
+    super(message);
+    this.name = "LarkUserAuthorizationUnavailableError";
+  }
 }
+
+export type LarkTransportLogger = SemanticLogger;
 
 interface LarkConnectionStatus {
   state: string;
@@ -63,10 +68,12 @@ export interface LarkWsClientPort {
 interface LarkMessageResponse {
   code?: number | undefined;
   msg?: string | undefined;
-  data?: {
-    message_id?: string | undefined;
-    thread_id?: string | undefined;
-  } | undefined;
+  data?:
+    | {
+        message_id?: string | undefined;
+        thread_id?: string | undefined;
+      }
+    | undefined;
 }
 
 interface LarkReactionResponse {
@@ -83,6 +90,11 @@ export interface LarkApiClientPort {
     data?: Record<string, unknown>;
   }): Promise<unknown>;
   im: {
+    image?: {
+      create(input: {
+        data: { image_type: "message"; image: Buffer };
+      }): Promise<{ image_key?: string | undefined } | null>;
+    };
     message: {
       reply(input: {
         path: { message_id: string };
@@ -92,7 +104,7 @@ export interface LarkApiClientPort {
           uuid?: string;
           reply_in_thread?: boolean;
         };
-      }): Promise<LarkMessageResponse>;
+      }, options?: unknown): Promise<LarkMessageResponse>;
     };
     messageReaction: {
       create(input: {
@@ -106,13 +118,18 @@ export interface LarkApiClientPort {
   };
 }
 
+export interface LarkSdkApiClientPort extends LarkApiClientPort {
+  accessToken: LarkOAuthTokenApi;
+}
+
 export interface LarkMessageTransport {
   consume(options: {
     signal?: AbortSignal;
     onReady?(): void;
     onMessage(message: LarkMessage): Promise<void>;
   }): Promise<void>;
-  replyToMessage(
+  replyToMessage(route: LarkReplyRoute, text: string): Promise<LarkReplyResult>;
+  replyToMessageAsUser?(
     route: LarkReplyRoute,
     text: string,
   ): Promise<LarkReplyResult>;
@@ -130,15 +147,16 @@ export interface LarkSdkTransportOptions {
   logger?: LarkTransportLogger;
   wsClient?: LarkWsClientPort;
   apiClient?: LarkApiClientPort;
+  userAuth?: LarkUserAccessTokenProvider;
   readinessTimeoutMs?: number;
   readinessPollIntervalMs?: number;
+  maxPendingMessages?: number;
 }
 
-const silentLogger: LarkTransportLogger = {
-  info: () => undefined,
-  warn: () => undefined,
-  error: () => undefined,
-};
+export interface LarkUserAccessTokenProvider {
+  accessToken(): Promise<string | undefined>;
+  invalidate?(): Promise<void>;
+}
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -160,7 +178,9 @@ export function resolveLarkCredentials(
     throw new Error("LARK_APP_ID and LARK_APP_SECRET must be configured");
   }
   if (!appId || !appSecret) {
-    throw new Error("LARK_APP_ID and LARK_APP_SECRET must be configured together");
+    throw new Error(
+      "LARK_APP_ID and LARK_APP_SECRET must be configured together",
+    );
   }
   return { appId, appSecret };
 }
@@ -175,10 +195,10 @@ function createLarkSdkLogger(logger: LarkTransportLogger): LarkSdkLogger {
   };
 }
 
-function createApiClient(
+export function createLarkSdkApiClient(
   credentials: LarkCredentials,
   logger: LarkTransportLogger,
-): LarkApiClientPort {
+): LarkSdkApiClientPort {
   return new Client({
     appId: credentials.appId,
     appSecret: credentials.appSecret,
@@ -200,7 +220,7 @@ function createWsClient(
     onReconnecting: () => logger.warn("lark_consumer.reconnecting"),
     onReconnected: () => logger.info("lark_consumer.reconnected"),
     onError: (error) =>
-      logger.error("lark_consumer.failed", { errorName: error.name }),
+      logger.error("lark_consumer.sdk_error", { errorName: error.name }),
   });
 }
 
@@ -226,7 +246,9 @@ export async function assertLarkBotReady(
   credentials: LarkCredentials = resolveLarkCredentials(),
   client?: LarkApiClientPort,
 ): Promise<BotIdentity> {
-  return resolveBotIdentity(client ?? createApiClient(credentials, silentLogger));
+  return resolveBotIdentity(
+    client ?? createLarkSdkApiClient(credentials, silentLogger),
+  );
 }
 
 interface FlattenedLarkMessageEnvelope {
@@ -278,6 +300,7 @@ export async function normalizeLarkMessageEnvelope(
     ...(threadId === undefined ? {} : { threadId }),
     chatId: message.chatId,
     chatType: message.chatType,
+    mentionedBot: message.mentionedBot,
     senderId: message.senderId,
     messageType: message.rawContentType,
     content: message.content.trim(),
@@ -291,24 +314,60 @@ export function topicRootMessageId(message: LarkMessage): string {
 }
 
 export function replyIdempotencyKey(messageId: string): string {
-  const digest = createHash("sha256").update(messageId).digest("hex").slice(0, 32);
+  const digest = createHash("sha256")
+    .update(messageId)
+    .digest("hex")
+    .slice(0, 32);
   return `dsh-${digest}`;
 }
 
-function replyText(text: string): string {
-  const normalized = text.trim() || "DeepSeek Harness 未生成文本回复。";
-  if (normalized.length <= 10_000) return normalized;
-  return `${normalized.slice(0, 9_980)}\n\n[回复已截断]`;
+function messageReplyInput(route: LarkReplyRoute, markdown: string) {
+  return {
+    path: { message_id: route.topicRootMessageId },
+    data: {
+      msg_type: "post",
+      content: JSON.stringify({
+        zh_cn: {
+          content: [[{ tag: "md", text: markdown }]],
+        },
+      }),
+      uuid: replyIdempotencyKey(route.sourceMessageId),
+      reply_in_thread: true,
+    },
+  };
+}
+
+function replyResult(
+  response: LarkMessageResponse,
+  identity: "message" | "user message",
+): LarkReplyResult {
+  if (response.code !== undefined && response.code !== 0) {
+    throw new Error(
+      `Lark ${identity} reply failed: ${response.msg ?? "unknown error"}`,
+    );
+  }
+  const messageId = response.data?.message_id?.trim();
+  if (!messageId) {
+    throw new Error(`Lark ${identity} reply returned no message_id`);
+  }
+  const threadId = response.data?.thread_id?.trim();
+  return { messageId, ...(threadId ? { threadId } : {}) };
 }
 
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-function waitForAbort(signal?: AbortSignal): Promise<void> {
+function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.resolve();
   return new Promise((resolve) => {
-    signal?.addEventListener("abort", () => resolve(), { once: true });
+    const finish = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, milliseconds);
+    signal?.addEventListener("abort", finish, { once: true });
   });
 }
 
@@ -317,23 +376,33 @@ export class LarkSdkTransport implements LarkMessageTransport {
   private readonly logger: LarkTransportLogger;
   private readonly wsClient: LarkWsClientPort;
   private readonly apiClient: LarkApiClientPort;
+  private readonly userAuth: LarkUserAccessTokenProvider | undefined;
   private readonly readinessTimeoutMs: number;
   private readonly readinessPollIntervalMs: number;
+  private readonly maxPendingMessages: number;
   private botIdentity: BotIdentity | undefined;
   private onMessage: ((message: LarkMessage) => Promise<void>) | undefined;
-  private messageQueue: Promise<void> = Promise.resolve();
+  private readonly messageTasks = new Set<Promise<void>>();
   private consuming = false;
 
   constructor(options: LarkSdkTransportOptions) {
     this.logger = options.logger ?? silentLogger;
     this.apiClient =
-      options.apiClient ?? createApiClient(options.credentials, this.logger);
+      options.apiClient ?? createLarkSdkApiClient(options.credentials, this.logger);
+    this.userAuth = options.userAuth;
     this.wsClient =
       options.wsClient ?? createWsClient(options.credentials, this.logger);
     this.readinessTimeoutMs =
       options.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
     this.readinessPollIntervalMs =
       options.readinessPollIntervalMs ?? DEFAULT_READINESS_POLL_INTERVAL_MS;
+    this.maxPendingMessages = options.maxPendingMessages ?? 256;
+    if (
+      !Number.isInteger(this.maxPendingMessages) ||
+      this.maxPendingMessages < 1
+    ) {
+      throw new Error("maxPendingMessages must be a positive integer");
+    }
     const sdkLogger = createLarkSdkLogger(this.logger);
     this.eventDispatcher = new EventDispatcher({
       logger: sdkLogger,
@@ -355,6 +424,7 @@ export class LarkSdkTransport implements LarkMessageTransport {
     this.consuming = true;
     this.onMessage = options.onMessage;
     let forceClose = false;
+    let ready = false;
     try {
       this.logger.info("lark_consumer.starting");
       this.botIdentity = await resolveBotIdentity(this.apiClient);
@@ -363,18 +433,22 @@ export class LarkSdkTransport implements LarkMessageTransport {
       this.logger.info("lark_consumer.ready", {
         botOpenId: this.botIdentity.openId,
       });
+      ready = true;
       options.onReady?.();
-      await waitForAbort(options.signal);
+      await this.monitorConnection(options.signal);
     } catch (error) {
       forceClose = true;
-      this.logger.error("lark_consumer.start_failed", {
-        connectionState: this.wsClient.getConnectionStatus().state,
-        errorName: error instanceof Error ? error.name : typeof error,
-      });
+      this.logger.error(
+        ready ? "lark_consumer.runtime_failed" : "lark_consumer.start_failed",
+        {
+          connectionState: this.wsClient.getConnectionStatus().state,
+          errorName: error instanceof Error ? error.name : typeof error,
+        },
+      );
       throw error;
     } finally {
       this.wsClient.close({ force: forceClose });
-      await this.messageQueue;
+      await Promise.allSettled([...this.messageTasks]);
       this.onMessage = undefined;
       this.consuming = false;
       this.logger.info("lark_consumer.stopped", { force: forceClose });
@@ -385,29 +459,34 @@ export class LarkSdkTransport implements LarkMessageTransport {
     route: LarkReplyRoute,
     text: string,
   ): Promise<LarkReplyResult> {
-    const response = await this.apiClient.im.message.reply({
-      path: { message_id: route.topicRootMessageId },
-      data: {
-        msg_type: "text",
-        content: JSON.stringify({ text: replyText(text) }),
-        uuid: replyIdempotencyKey(route.sourceMessageId),
-        reply_in_thread: true,
-      },
-    });
+    const response = await this.apiClient.im.message.reply(
+      messageReplyInput(route, await this.renderReplyMarkdown(text)),
+    );
+    return replyResult(response, "message");
+  }
+
+  async replyToMessageAsUser(
+    route: LarkReplyRoute,
+    text: string,
+  ): Promise<LarkReplyResult> {
+    let accessToken: string | undefined;
+    try {
+      accessToken = await this.userAuth?.accessToken();
+    } catch {
+      throw new LarkUserAuthorizationUnavailableError();
+    }
+    if (!accessToken) throw new LarkUserAuthorizationUnavailableError();
+    const response = await this.apiClient.im.message.reply(
+      messageReplyInput(route, await this.renderReplyMarkdown(text)),
+      withUserAccessToken(accessToken),
+    );
     if (response.code !== undefined && response.code !== 0) {
-      throw new Error(
-        `Lark message reply failed: ${response.msg ?? "unknown error"}`,
+      await this.userAuth?.invalidate?.().catch(() => undefined);
+      throw new LarkUserAuthorizationUnavailableError(
+        `Lark user message reply failed: ${response.msg ?? "unknown error"}`,
       );
     }
-    const replyId = response.data?.message_id?.trim();
-    if (!replyId) {
-      throw new Error("Lark message reply returned no message_id");
-    }
-    const threadId = response.data?.thread_id?.trim();
-    return {
-      messageId: replyId,
-      ...(threadId ? { threadId } : {}),
-    };
+    return replyResult(response, "user message");
   }
 
   async addReaction(messageId: string, emojiType: string): Promise<string> {
@@ -446,15 +525,35 @@ export class LarkSdkTransport implements LarkMessageTransport {
     return new LarkCotGateway(this.apiClient).create(input);
   }
 
+  private renderReplyMarkdown(text: string): Promise<string> {
+    return renderLarkMarkdown(text, async (png) => {
+      const response = await this.apiClient.im.image?.create({
+        data: { image_type: "message", image: png },
+      });
+      const imageKey = response?.image_key?.trim();
+      if (!imageKey) throw new Error("Lark image upload returned no image_key");
+      return imageKey;
+    });
+  }
+
   private enqueue(raw: unknown): Promise<void> {
-    this.messageQueue = this.messageQueue
-      .then(() => this.handleRaw(raw))
+    if (this.messageTasks.size >= this.maxPendingMessages) {
+      this.logger.warn("lark_consumer.backpressure", {
+        maxPendingMessages: this.maxPendingMessages,
+      });
+      return Promise.reject(new Error("Lark inbound message queue is full"));
+    }
+    const task = this.handleRaw(raw)
       .catch((error: unknown) => {
         this.logger.error("lark_consumer.message_failed", {
           errorName: error instanceof Error ? error.name : typeof error,
         });
+      })
+      .finally(() => {
+        this.messageTasks.delete(task);
       });
-    return this.messageQueue;
+    this.messageTasks.add(task);
+    return task;
   }
 
   private async handleRaw(raw: unknown): Promise<void> {
@@ -479,5 +578,14 @@ export class LarkSdkTransport implements LarkMessageTransport {
     throw new Error(
       `Lark WebSocket did not become ready within ${this.readinessTimeoutMs}ms`,
     );
+  }
+
+  private async monitorConnection(signal?: AbortSignal): Promise<void> {
+    while (!signal?.aborted) {
+      if (this.wsClient.getConnectionStatus().state === "failed") {
+        throw new Error("Lark WebSocket connection failed after readiness");
+      }
+      await delay(this.readinessPollIntervalMs, signal);
+    }
   }
 }

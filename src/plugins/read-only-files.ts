@@ -98,10 +98,7 @@ export function isSensitiveWorkspacePath(value: unknown): boolean {
   }
   const basename = segments.at(-1);
   if (basename === undefined) return false;
-  if (
-    basename.startsWith(".env") &&
-    !SAFE_ENV_EXAMPLES.has(basename)
-  ) {
+  if (basename.startsWith(".env") && !SAFE_ENV_EXAMPLES.has(basename)) {
     return true;
   }
   return (
@@ -150,6 +147,39 @@ export function readOnlyToolGuard(
   return undefined;
 }
 
+export function filterSearchResult(
+  toolName: string,
+  value: JsonValue,
+): JsonValue {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return value;
+  }
+  const result = value as Record<string, JsonValue>;
+  if (toolName === "glob" && Array.isArray(result.paths)) {
+    return {
+      ...result,
+      paths: result.paths.filter(
+        (item): item is string =>
+          typeof item === "string" && !isSensitiveWorkspacePath(item),
+      ),
+    };
+  }
+  if (toolName === "grep" && Array.isArray(result.matches)) {
+    return {
+      ...result,
+      matches: result.matches.filter((item) => {
+        if (typeof item !== "object" || item === null || Array.isArray(item)) {
+          return false;
+        }
+        return !isSensitiveWorkspacePath(
+          (item as Record<string, JsonValue>).path,
+        );
+      }),
+    };
+  }
+  return value;
+}
+
 function readMeta(value: JsonValue | undefined): ReadMeta | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return undefined;
@@ -183,7 +213,9 @@ function readMeta(value: JsonValue | undefined): ReadMeta | undefined {
 }
 
 function renderRead(meta: ReadMeta): string {
-  const body = meta.lines.map((line) => `${line.number}: ${line.text}`).join("\n");
+  const body = meta.lines
+    .map((line) => `${line.number}: ${line.text}`)
+    .join("\n");
   const end = meta.lines.at(-1)?.number ?? Math.max(0, meta.offset - 1);
   const footer =
     end < meta.totalLines
@@ -199,140 +231,176 @@ export function apply(ctx: Context): void {
     text: "You may inspect only non-sensitive files in the session workspace. Never inspect .env files, credential stores, private keys, or VCS metadata. Use targeted read, glob, and grep calls; glob patterns must be anchored and grep needs a path or include filter. You cannot write or edit files and must not claim that you did.",
   });
   ctx.tools.guard(readOnlyToolGuard);
+  ctx.on("tools/post-execute", async (exec, result, next) => {
+    const decision = await next();
+    if (
+      result.isError ||
+      (exec.name !== "glob" && exec.name !== "grep") ||
+      decision.kind === "block"
+    ) {
+      return decision;
+    }
+    const value = "value" in decision ? decision.value : result.value;
+    return {
+      kind: "accept",
+      value: filterSearchResult(exec.name, value),
+      ...(decision.additionalContexts === undefined
+        ? {}
+        : { additionalContexts: decision.additionalContexts }),
+    };
+  });
   const definition: ToolDefinition = {
-      name: "read",
-      description:
-        "Read a UTF-8 text file inside the session workspace and return line-numbered content.",
-      parameters: {
+    name: "read",
+    description:
+      "Read a UTF-8 text file inside the session workspace and return line-numbered content.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        file_path: {
+          type: "string",
+          description: "Workspace-relative path to read.",
+        },
+        offset: {
+          type: "number",
+          description: "1-based first line to return. Defaults to 1.",
+        },
+        limit: {
+          type: "number",
+          description: `Maximum lines to return. Defaults to ${DEFAULT_LIMIT}, capped at ${MAX_LIMIT}.`,
+        },
+      },
+      required: ["file_path"],
+    },
+    output: {
+      schema: {
         type: "object",
         additionalProperties: false,
         properties: {
-          file_path: {
-            type: "string",
-            description: "Workspace-relative path to read.",
-          },
-          offset: {
-            type: "number",
-            description: "1-based first line to return. Defaults to 1.",
-          },
-          limit: {
-            type: "number",
-            description: `Maximum lines to return. Defaults to ${DEFAULT_LIMIT}, capped at ${MAX_LIMIT}.`,
-          },
-        },
-        required: ["file_path"],
-      },
-      output: {
-        schema: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            path: { type: "string" },
-            offset: { type: "integer" },
-            lines: {
-              type: "array",
-              items: {
-                type: "object",
-                additionalProperties: false,
-                properties: {
-                  number: { type: "integer" },
-                  text: { type: "string" },
-                },
-                required: ["number", "text"],
+          path: { type: "string" },
+          offset: { type: "integer" },
+          lines: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                number: { type: "integer" },
+                text: { type: "string" },
               },
+              required: ["number", "text"],
             },
-            totalLines: { type: "integer" },
           },
-          required: ["path", "offset", "lines", "totalLines"],
+          totalLines: { type: "integer" },
         },
-        render: (_args, value) => [
-          { type: "text" as const, text: renderRead(value as unknown as ReadMeta) },
-        ],
-        presentationMeta: (_args, value) => value,
+        required: ["path", "offset", "lines", "totalLines"],
       },
-      isConcurrencySafe: () => true,
-      async execute(value, exec) {
-        const args = readArgs(value);
-        const filePath = args.file_path.trim();
-        if (filePath.length === 0) {
-          throw new Error("file_path must be a non-empty string");
-        }
-        if (isSensitiveWorkspacePath(filePath)) {
-          throw new Error("lark-safe cannot read sensitive credential files");
-        }
-        const offset = positiveInteger(args.offset, 1, "offset");
-        const limit = positiveInteger(args.limit, DEFAULT_LIMIT, "limit");
-        if (limit > MAX_LIMIT) throw new Error(`limit must be at most ${MAX_LIMIT}`);
+      render: (_args, value) => [
+        {
+          type: "text" as const,
+          text: renderRead(value as unknown as ReadMeta),
+        },
+      ],
+      presentationMeta: (_args, value) => value,
+    },
+    isConcurrencySafe: () => true,
+    async execute(value, exec) {
+      const args = readArgs(value);
+      const filePath = args.file_path.trim();
+      if (filePath.length === 0) {
+        throw new Error("file_path must be a non-empty string");
+      }
+      if (isSensitiveWorkspacePath(filePath)) {
+        throw new Error("lark-safe cannot read sensitive credential files");
+      }
+      const offset = positiveInteger(args.offset, 1, "offset");
+      const limit = positiveInteger(args.limit, DEFAULT_LIMIT, "limit");
+      if (limit > MAX_LIMIT)
+        throw new Error(`limit must be at most ${MAX_LIMIT}`);
 
-        const cwd = exec.agent?.session.header.cwd;
-        if (cwd === undefined) throw new Error("read requires a session workspace");
-        const root = await ctx.fs.resolve(cwd, { signal: exec.signal });
-        const target = await ctx.fs.resolve(filePath, { cwd, signal: exec.signal });
-        if (!ctx.fs.contains(root, target)) {
-          throw new Error("lark-safe read paths must stay inside the session workspace");
-        }
-        if (isSensitiveWorkspacePath(target.displayPath)) {
-          throw new Error("lark-safe cannot read sensitive credential files");
-        }
-        const info = await ctx.fs.stat(target, exec.signal);
-        if (info === undefined) throw new Error(`cannot read ${filePath}: not found`);
-        if (info.type !== "file") {
-          throw new Error(`cannot read ${filePath}: not a regular file`);
-        }
-        if (info.size !== undefined && info.size > MAX_FILE_BYTES) {
-          throw new Error(`cannot read ${filePath}: file exceeds ${MAX_FILE_BYTES} bytes`);
-        }
-
-        const content = await ctx.fs.readText(target, exec.signal);
-        if (Buffer.byteLength(content, "utf8") > MAX_FILE_BYTES) {
-          throw new Error(`cannot read ${filePath}: file exceeds ${MAX_FILE_BYTES} bytes`);
-        }
-        const allLines = content.length === 0 ? [] : content.split(/\r?\n/u);
-        if (offset > allLines.length && !(allLines.length === 0 && offset === 1)) {
-          throw new Error(
-            `offset ${offset} is outside ${filePath} (${allLines.length} lines)`,
-          );
-        }
-        const lines = allLines
-          .slice(offset - 1, offset - 1 + limit)
-          .map((text, index) => ({
-            number: offset + index,
-            text:
-              text.length > MAX_LINE_LENGTH
-                ? `${text.slice(0, MAX_LINE_LENGTH)}... (line truncated)`
-                : text,
-          }));
-        ctx.emit(
-          "fs/observed",
-          target,
-          { kind: "present", version: info.version },
-          exec,
+      const cwd = exec.agent?.session.header.cwd;
+      if (cwd === undefined)
+        throw new Error("read requires a session workspace");
+      const root = await ctx.fs.resolve(cwd, { signal: exec.signal });
+      const target = await ctx.fs.resolve(filePath, {
+        cwd,
+        signal: exec.signal,
+      });
+      if (!ctx.fs.contains(root, target)) {
+        throw new Error(
+          "lark-safe read paths must stay inside the session workspace",
         );
+      }
+      if (isSensitiveWorkspacePath(target.displayPath)) {
+        throw new Error("lark-safe cannot read sensitive credential files");
+      }
+      const info = await ctx.fs.stat(target, exec.signal);
+      if (info === undefined)
+        throw new Error(`cannot read ${filePath}: not found`);
+      if (info.type !== "file") {
+        throw new Error(`cannot read ${filePath}: not a regular file`);
+      }
+      if (info.size !== undefined && info.size > MAX_FILE_BYTES) {
+        throw new Error(
+          `cannot read ${filePath}: file exceeds ${MAX_FILE_BYTES} bytes`,
+        );
+      }
+
+      const content = await ctx.fs.readText(target, exec.signal);
+      if (Buffer.byteLength(content, "utf8") > MAX_FILE_BYTES) {
+        throw new Error(
+          `cannot read ${filePath}: file exceeds ${MAX_FILE_BYTES} bytes`,
+        );
+      }
+      const allLines = content.length === 0 ? [] : content.split(/\r?\n/u);
+      if (
+        offset > allLines.length &&
+        !(allLines.length === 0 && offset === 1)
+      ) {
+        throw new Error(
+          `offset ${offset} is outside ${filePath} (${allLines.length} lines)`,
+        );
+      }
+      const lines = allLines
+        .slice(offset - 1, offset - 1 + limit)
+        .map((text, index) => ({
+          number: offset + index,
+          text:
+            text.length > MAX_LINE_LENGTH
+              ? `${text.slice(0, MAX_LINE_LENGTH)}... (line truncated)`
+              : text,
+        }));
+      ctx.emit(
+        "fs/observed",
+        target,
+        { kind: "present", version: info.version },
+        exec,
+      );
+      return {
+        path: target.displayPath,
+        offset,
+        lines,
+        totalLines: allLines.length,
+      };
+    },
+    presentCall: (value) => {
+      try {
+        const args = readArgs(value);
         return {
-          path: target.displayPath,
-          offset,
-          lines,
-          totalLines: allLines.length,
+          card: "generic",
+          title: `Read ${args.file_path}`,
+          kind: "read",
+          locations: [{ path: args.file_path, line: args.offset ?? 1 }],
         };
-      },
-      presentCall: (value) => {
-        try {
-          const args = readArgs(value);
-          return {
-            card: "generic",
-            title: `Read ${args.file_path}`,
-            kind: "read",
-            locations: [{ path: args.file_path, line: args.offset ?? 1 }],
-          };
-        } catch {
-          return undefined;
-        }
-      },
-      presentResult: (_args, result): ReadResultView | undefined => {
-        if (result.isError) return undefined;
-        const meta = readMeta(result.meta);
-        return meta === undefined ? undefined : { card: "read", ...meta };
-      },
-    };
+      } catch {
+        return undefined;
+      }
+    },
+    presentResult: (_args, result): ReadResultView | undefined => {
+      if (result.isError) return undefined;
+      const meta = readMeta(result.meta);
+      return meta === undefined ? undefined : { card: "read", ...meta };
+    },
+  };
   ctx.tools.register(definition);
 }

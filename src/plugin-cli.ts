@@ -20,7 +20,7 @@ async function run(): Promise<void> {
   console.log(
     JSON.stringify(
       {
-        plugin: "@aiden-ai/dsh-lark-bridge",
+        plugin: "@open-aiden/dsh-lark-bridge",
         preset: BUNDLED_PRESET_ID,
         presetStatus: preset.installed ? "installed" : "ready",
         larkBot: "ready",

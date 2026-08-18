@@ -68,6 +68,7 @@ export interface EnsuredSession {
 export interface WaitForTurnOptions {
   timeoutMs?: number;
   pollMs?: number;
+  signal?: AbortSignal;
   onEvents?(events: SessionEvent[]): void | Promise<void>;
 }
 
@@ -78,8 +79,17 @@ export interface DshBridgeClient {
     workspaceId: string,
     agentPreset: string,
   ): Promise<EnsuredSession>;
+  history(
+    sessionId: string,
+    maxMessages?: number,
+    beforeSeq?: number,
+  ): Promise<SessionEvent[]>;
   lastSeq(sessionId: string): Promise<number>;
-  prompt(sessionId: string, text: string): Promise<void>;
+  prompt(
+    sessionId: string,
+    text: string,
+    onRequest?: (rpcId: string) => void,
+  ): Promise<void>;
   renameSession(sessionId: string, title: string): Promise<void>;
   waitForTurn(
     sessionId: string,
@@ -112,15 +122,14 @@ export function completedTurnAfter(
   afterSeq: number,
 ): CompletedTurn | undefined {
   const fresh = events.filter((event) => event.seq > afterSeq);
-  const turnEnd = fresh.findLast((event) => event.type === "turn/end");
+  const turnEnd = fresh.find((event) => event.type === "turn/end");
   if (turnEnd === undefined) {
     return undefined;
   }
 
   const assistant = fresh
     .filter(
-      (event) =>
-        event.type === "assistant/message" && event.seq < turnEnd.seq,
+      (event) => event.type === "assistant/message" && event.seq < turnEnd.seq,
     )
     .at(-1);
   const assistantData = asObject(assistant?.data);
@@ -150,14 +159,118 @@ export function completedTurnAfter(
   };
 }
 
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new Error("operation aborted");
+}
+
+function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(abortReason(signal));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortReason(signal as AbortSignal));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+export async function waitForCompletedTurn(
+  history: (
+    sessionId: string,
+    maxMessages: number,
+    beforeSeq?: number,
+  ) => Promise<SessionEvent[]>,
+  sessionId: string,
+  afterSeq: number,
+  options: WaitForTurnOptions = {},
+): Promise<CompletedTurn> {
+  const timeoutMs = options.timeoutMs ?? 300_000;
+  const pollMs = options.pollMs ?? 500;
+  const deadline = Date.now() + timeoutMs;
+  let deliveredSeq = afterSeq;
+  while (Date.now() < deadline) {
+    if (options.signal?.aborted) throw abortReason(options.signal);
+    const events = await historySince(
+      history,
+      sessionId,
+      afterSeq,
+      options.signal,
+    );
+    if (options.signal?.aborted) throw abortReason(options.signal);
+    const completed = completedTurnAfter(events, afterSeq);
+    const throughSeq = completed?.turnEndSeq ?? Number.POSITIVE_INFINITY;
+    const fresh = events.filter(
+      (event) => event.seq > deliveredSeq && event.seq <= throughSeq,
+    );
+    if (fresh.length > 0) {
+      deliveredSeq = fresh.reduce(
+        (latest, event) => Math.max(latest, event.seq),
+        deliveredSeq,
+      );
+      const presentationEvents = fresh.filter((event) =>
+        new Set(["step/start", "tool/call", "tool/result"]).has(event.type),
+      );
+      if (presentationEvents.length > 0) {
+        await options.onEvents?.(presentationEvents);
+      }
+    }
+    if (completed !== undefined) return completed;
+    await delay(pollMs, options.signal);
+  }
+  throw new Error(
+    `DSH session ${sessionId} did not finish within ${timeoutMs}ms`,
+  );
+}
+
+export async function historySince(
+  history: (
+    sessionId: string,
+    maxMessages: number,
+    beforeSeq?: number,
+  ) => Promise<SessionEvent[]>,
+  sessionId: string,
+  afterSeq: number,
+  signal?: AbortSignal,
+): Promise<SessionEvent[]> {
+  const events = await history(sessionId, 8);
+  let earliest = events.reduce(
+    (value, event) => Math.min(value, event.seq),
+    Number.POSITIVE_INFINITY,
+  );
+  while (events.length > 0 && earliest > afterSeq) {
+    signal?.throwIfAborted();
+    const older = await history(sessionId, 8, earliest);
+    signal?.throwIfAborted();
+    const olderEarliest = older.reduce(
+      (value, event) => Math.min(value, event.seq),
+      Number.POSITIVE_INFINITY,
+    );
+    if (older.length === 0 || olderEarliest >= earliest) break;
+    events.unshift(...older);
+    earliest = olderEarliest;
+  }
+  return [...new Map(events.map((event) => [event.seq, event])).values()].sort(
+    (left, right) => left.seq - right.seq,
+  );
+}
+
 export class DshClient implements DshBridgeClient {
   constructor(
     readonly baseUrl: string,
     private readonly requestTimeoutMs = 30_000,
   ) {}
 
-  async call<T>(method: string, payload: JsonObject): Promise<T> {
+  async call<T>(
+    method: string,
+    payload: JsonObject,
+    onRequest?: (rpcId: string) => void,
+  ): Promise<T> {
     const rpcId = randomUUID();
+    onRequest?.(rpcId);
     const response = await fetch(new URL(`/api/${method}`, this.baseUrl), {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -170,7 +283,9 @@ export class DshClient implements DshBridgeClient {
       signal: AbortSignal.timeout(this.requestTimeoutMs),
     });
     if (!response.ok) {
-      throw new Error(`DSH ${method} transport failed with HTTP ${response.status}`);
+      throw new Error(
+        `DSH ${method} transport failed with HTTP ${response.status}`,
+      );
     }
     const envelope = (await response.json()) as ServerResponse<T>;
     if (envelope.rpcId !== rpcId) {
@@ -189,7 +304,10 @@ export class DshClient implements DshBridgeClient {
   }
 
   async listWorkspaces(): Promise<WorkspaceView[]> {
-    const value = await this.call<{ items: WorkspaceView[] }>("workspace.list", {});
+    const value = await this.call<{ items: WorkspaceView[] }>(
+      "workspace.list",
+      {},
+    );
     return value.items;
   }
 
@@ -216,7 +334,10 @@ export class DshClient implements DshBridgeClient {
   }
 
   async listSessions(): Promise<SessionSummary[]> {
-    const value = await this.call<{ items: SessionSummary[] }>("session.list", {});
+    const value = await this.call<{ items: SessionSummary[] }>(
+      "session.list",
+      {},
+    );
     return value.items;
   }
 
@@ -244,10 +365,15 @@ export class DshClient implements DshBridgeClient {
     return { sessionId: created.sessionId, created: true };
   }
 
-  async history(sessionId: string, maxMessages = 1): Promise<SessionEvent[]> {
+  async history(
+    sessionId: string,
+    maxMessages = 1,
+    beforeSeq?: number,
+  ): Promise<SessionEvent[]> {
     const value = await this.call<HistoryValue>("session.history", {
       sessionId,
       maxMessages,
+      ...(beforeSeq === undefined ? {} : { beforeSeq }),
     });
     return value.events.map((entry) => entry.event);
   }
@@ -257,13 +383,21 @@ export class DshClient implements DshBridgeClient {
     return events.reduce((latest, event) => Math.max(latest, event.seq), -1);
   }
 
-  async prompt(sessionId: string, text: string): Promise<void> {
-    await this.call("session.prompt", {
-      sessionId,
-      mode: "queue",
-      content: [{ type: "text", text }],
-      clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    });
+  async prompt(
+    sessionId: string,
+    text: string,
+    onRequest?: (rpcId: string) => void,
+  ): Promise<void> {
+    await this.call(
+      "session.prompt",
+      {
+        sessionId,
+        mode: "queue",
+        content: [{ type: "text", text }],
+        clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      },
+      onRequest,
+    );
   }
 
   async renameSession(sessionId: string, title: string): Promise<void> {
@@ -275,31 +409,11 @@ export class DshClient implements DshBridgeClient {
     afterSeq: number,
     options: WaitForTurnOptions = {},
   ): Promise<CompletedTurn> {
-    const timeoutMs = options.timeoutMs ?? 300_000;
-    const pollMs = options.pollMs ?? 500;
-    const deadline = Date.now() + timeoutMs;
-    let deliveredSeq = afterSeq;
-    while (Date.now() < deadline) {
-      const events = await this.history(sessionId, 8);
-      const fresh = events.filter((event) => event.seq > deliveredSeq);
-      if (fresh.length > 0) {
-        deliveredSeq = fresh.reduce(
-          (latest, event) => Math.max(latest, event.seq),
-          deliveredSeq,
-        );
-        const presentationEvents = fresh.filter((event) =>
-          new Set(["step/start", "tool/call", "tool/result"]).has(event.type),
-        );
-        if (presentationEvents.length > 0) {
-          await options.onEvents?.(presentationEvents);
-        }
-      }
-      const completed = completedTurnAfter(events, afterSeq);
-      if (completed !== undefined) {
-        return completed;
-      }
-      await new Promise((resolve) => setTimeout(resolve, pollMs));
-    }
-    throw new Error(`DSH session ${sessionId} did not finish within ${timeoutMs}ms`);
+    return waitForCompletedTurn(
+      (id, maxMessages, beforeSeq) => this.history(id, maxMessages, beforeSeq),
+      sessionId,
+      afterSeq,
+      options,
+    );
   }
 }

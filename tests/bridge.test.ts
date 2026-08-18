@@ -6,6 +6,7 @@ import type {
   CompletedTurn,
   DshBridgeClient,
   EnsuredSession,
+  SessionEvent,
   WorkspaceView,
 } from "../src/dsh-client.js";
 import type { CotEvent, CotWriterPort } from "../src/cot.js";
@@ -15,9 +16,11 @@ import type {
   LarkReplyResult,
   LarkReplyRoute,
 } from "../src/lark.js";
+import { LarkUserAuthorizationUnavailableError } from "../src/lark.js";
 
 class FakeDshClient implements DshBridgeClient {
   readonly sessionIds: string[] = [];
+  historyEvents: SessionEvent[] = [];
 
   ensureWorkspace(): Promise<WorkspaceView> {
     return Promise.resolve({
@@ -37,7 +40,16 @@ class FakeDshClient implements DshBridgeClient {
     return Promise.resolve(0);
   }
 
-  prompt(): Promise<void> {
+  history(): Promise<SessionEvent[]> {
+    return Promise.resolve(this.historyEvents);
+  }
+
+  prompt(
+    _sessionId: string,
+    _text: string,
+    onRequest?: (rpcId: string) => void,
+  ): Promise<void> {
+    onRequest?.("bridge-rpc-1");
     return Promise.resolve();
   }
 
@@ -75,10 +87,18 @@ class FakeDshClient implements DshBridgeClient {
 
 class FakeLarkTransport implements LarkMessageTransport {
   readonly replies: LarkReplyRoute[] = [];
+  readonly replyTexts: string[] = [];
+  readonly userReplyTexts: string[] = [];
   readonly operations: string[] = [];
   readonly cotEvents: CotEvent[] = [];
 
-  constructor(private readonly messages: LarkMessage[]) {}
+  constructor(
+    private readonly messages: LarkMessage[],
+    private readonly afterMessages?: () => Promise<void>,
+    private readonly userReplyModes: Array<
+      "success" | "unavailable" | "failed"
+    > = [],
+  ) {}
 
   async consume(options: {
     onReady?(): void;
@@ -86,11 +106,33 @@ class FakeLarkTransport implements LarkMessageTransport {
   }): Promise<void> {
     options.onReady?.();
     for (const message of this.messages) await options.onMessage(message);
+    await this.afterMessages?.();
   }
 
-  replyToMessage(route: LarkReplyRoute): Promise<LarkReplyResult> {
+  replyToMessage(
+    route: LarkReplyRoute,
+    text: string,
+  ): Promise<LarkReplyResult> {
     this.replies.push(route);
+    this.replyTexts.push(text);
     this.operations.push(`reply:${route.sourceMessageId}`);
+    return Promise.resolve({ messageId: `reply-${this.replies.length}` });
+  }
+
+  replyToMessageAsUser(
+    route: LarkReplyRoute,
+    text: string,
+  ): Promise<LarkReplyResult> {
+    const mode = this.userReplyModes.shift() ?? "unavailable";
+    this.operations.push(`user-reply:${route.sourceMessageId}:${mode}`);
+    if (mode === "unavailable") {
+      return Promise.reject(new LarkUserAuthorizationUnavailableError());
+    }
+    if (mode === "failed") {
+      return Promise.reject(new Error("network failure"));
+    }
+    this.replies.push(route);
+    this.userReplyTexts.push(text);
     return Promise.resolve({ messageId: `reply-${this.replies.length}` });
   }
 
@@ -204,4 +246,246 @@ test("a Feishu topic reuses one DSH session and replies to its root", async () =
     ],
   );
   assert.equal(JSON.stringify(lark.cotEvents).includes("hidden"), false);
+});
+
+test("a group message is handled only when it mentions the bot", async () => {
+  const client = new FakeDshClient();
+  const lark = new FakeLarkTransport([
+    {
+      eventId: "event-unmentioned",
+      messageId: "group-message-unmentioned",
+      chatId: "group-chat",
+      chatType: "group",
+      mentionedBot: false,
+      senderId: "user-1",
+      messageType: "text",
+      content: "ignore me",
+    },
+    {
+      eventId: "event-mentioned",
+      messageId: "group-message-mentioned",
+      chatId: "group-chat",
+      chatType: "group",
+      mentionedBot: true,
+      senderId: "user-1",
+      messageType: "text",
+      content: "help me",
+    },
+  ]);
+
+  assert.equal(await runBridge({ client, lark, workspacePath: "/project" }), 1);
+  assert.deepEqual(lark.replyTexts, ["answer"]);
+  assert.deepEqual(lark.replies, [
+    {
+      sourceMessageId: "group-message-mentioned",
+      topicRootMessageId: "group-message-mentioned",
+    },
+  ]);
+});
+
+test("messages sent from Web show progress in the linked Feishu topic", async () => {
+  const client = new FakeDshClient();
+  let lark!: FakeLarkTransport;
+  lark = new FakeLarkTransport(
+    [
+      {
+        eventId: "event-1",
+        messageId: "root-message",
+        chatId: "chat-1",
+        chatType: "p2p",
+        senderId: "user-1",
+        messageType: "text",
+        content: "start from Feishu",
+      },
+    ],
+    async () => {
+      client.historyEvents = [
+        { type: "turn/start", seq: 1, time: 1, data: { turn: 2 } },
+        { type: "step/start", seq: 2, time: 2, data: { turn: 2, step: 1 } },
+        {
+          type: "user/message",
+          seq: 3,
+          time: 3,
+          data: {
+            role: "user",
+            source: { kind: "user", rpcId: "bridge-rpc-1" },
+            content: [{ type: "text", text: "start from Feishu" }],
+          },
+        },
+        {
+          type: "assistant/message",
+          seq: 4,
+          time: 4,
+          data: {
+            message: {
+              content: [{ type: "text", text: "already mirrored answer" }],
+            },
+          },
+        },
+        {
+          type: "turn/end",
+          seq: 5,
+          time: 5,
+          data: { turn: 2, reason: { kind: "completed" } },
+        },
+        { type: "turn/start", seq: 6, time: 6, data: { turn: 3 } },
+        { type: "step/start", seq: 7, time: 7, data: { turn: 3, step: 1 } },
+        {
+          type: "user/message",
+          seq: 8,
+          time: 8,
+          data: {
+            role: "user",
+            source: {
+              kind: "user",
+              rpcId: "web-rpc-1",
+              clientTimeZone: "Asia/Shanghai",
+            },
+            content: [{ type: "text", text: "continue from Web" }],
+          },
+        },
+        {
+          type: "tool/call",
+          seq: 9,
+          time: 9,
+          data: {
+            callId: "web-call-1",
+            name: "read",
+            arguments: "hidden Web arguments",
+          },
+        },
+        {
+          type: "tool/result",
+          seq: 10,
+          time: 10,
+          data: {
+            callId: "web-call-1",
+            secretResult: "hidden Web result",
+          },
+        },
+        {
+          type: "assistant/message",
+          seq: 11,
+          time: 11,
+          data: {
+            message: {
+              content: [{ type: "text", text: "answer for Web" }],
+            },
+          },
+        },
+        {
+          type: "turn/end",
+          seq: 12,
+          time: 12,
+          data: { turn: 3, reason: { kind: "completed" } },
+        },
+      ];
+      const deadline = Date.now() + 700;
+      while (
+        (lark.replyTexts.length < 3 || lark.cotEvents.length < 18) &&
+        Date.now() < deadline
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    },
+    ["success"],
+  );
+
+  await runBridge({
+    client,
+    lark,
+    workspacePath: "/project",
+  });
+
+  assert.deepEqual(lark.replyTexts, ["answer", "answer for Web"]);
+  assert.deepEqual(lark.userReplyTexts, ["continue from Web"]);
+  assert.deepEqual(lark.replies.slice(1), [
+    {
+      sourceMessageId: "web-user:lark-4d218b499373d512515ee2b4:8",
+      topicRootMessageId: "root-message",
+    },
+    {
+      sourceMessageId: "web-assistant:lark-4d218b499373d512515ee2b4:12",
+      topicRootMessageId: "root-message",
+    },
+  ]);
+  assert.ok(lark.operations.includes("cot:create:chat-1:reply-2:false"));
+  assert.deepEqual(
+    lark.cotEvents.slice(-9).map((event) => event.eventType),
+    [
+      "RUN_STARTED",
+      "REASONING_START",
+      "REASONING_MESSAGE_START",
+      "REASONING_MESSAGE_CONTENT",
+      "REASONING_MESSAGE_END",
+      "TOOL_CALL_START",
+      "TOOL_CALL_END",
+      "REASONING_END",
+      "RUN_FINISHED",
+    ],
+  );
+  const webCot = JSON.stringify(lark.cotEvents.slice(-9));
+  assert.equal(webCot.includes("hidden Web arguments"), false);
+  assert.equal(webCot.includes("hidden Web result"), false);
+});
+
+test("a failed user-identity send falls back to a quoted bot reply", async () => {
+  const client = new FakeDshClient();
+  let lark!: FakeLarkTransport;
+  lark = new FakeLarkTransport(
+    [
+      {
+        eventId: "event-1",
+        messageId: "root-message",
+        chatId: "chat-1",
+        chatType: "p2p",
+        senderId: "user-1",
+        messageType: "text",
+        content: "start from Feishu",
+      },
+    ],
+    async () => {
+      client.historyEvents = [
+        { type: "turn/start", seq: 2, time: 2, data: { turn: 2 } },
+        { type: "step/start", seq: 3, time: 3, data: { turn: 2, step: 1 } },
+        {
+          type: "user/message",
+          seq: 4,
+          time: 4,
+          data: {
+            source: { kind: "user", rpcId: "web-rpc-1" },
+            content: [{ type: "text", text: "first line\nsecond line" }],
+          },
+        },
+        {
+          type: "assistant/message",
+          seq: 5,
+          time: 5,
+          data: {
+            message: { content: [{ type: "text", text: "web answer" }] },
+          },
+        },
+        {
+          type: "turn/end",
+          seq: 6,
+          time: 6,
+          data: { turn: 2, reason: { kind: "completed" } },
+        },
+      ];
+      const deadline = Date.now() + 700;
+      while (lark.replyTexts.length < 3 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    },
+    ["failed"],
+  );
+
+  await runBridge({ client, lark, workspacePath: "/project" });
+
+  assert.deepEqual(lark.userReplyTexts, []);
+  assert.deepEqual(lark.replyTexts, [
+    "answer",
+    "**【来自用户在 Web 上的输入】**\n\n> first line\n> second line",
+    "web answer",
+  ]);
 });

@@ -3,7 +3,13 @@ import path from "node:path";
 import { config as loadDotenv } from "dotenv";
 import { runBridge } from "./bridge.js";
 import { DEFAULT_DSH_PORT, DEFAULT_DSH_URL, PROJECT_ROOT } from "./config.js";
+import { ConsumerSupervisor } from "./consumer-supervisor.js";
 import { DshClient } from "./dsh-client.js";
+import {
+  defaultAdmissionStatePath,
+  EventAdmissionStore,
+  JsonFileAdmissionAdapter,
+} from "./event-admission.js";
 import { assertDshInstalled, DshWebHost, prepareDshHome } from "./host.js";
 import {
   assertLarkBotReady,
@@ -12,7 +18,11 @@ import {
   type LarkTransportLogger,
 } from "./lark.js";
 
-loadDotenv({ path: path.join(PROJECT_ROOT, ".env"), override: false, quiet: true });
+loadDotenv({
+  path: path.join(PROJECT_ROOT, ".env"),
+  override: false,
+  quiet: true,
+});
 
 const larkLogger: LarkTransportLogger = {
   info: (event, fields) =>
@@ -34,6 +44,39 @@ function numberOption(name: string, fallback: number): number {
     throw new Error(`${name} must be a non-negative integer`);
   }
   return value;
+}
+
+function positiveEnvironmentInteger(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return value;
+}
+
+function standaloneAdmission(): EventAdmissionStore {
+  const allowedSenderIds = process.env.DSH_LARK_ALLOWED_SENDERS?.split(",")
+    .map((senderId) => senderId.trim())
+    .filter(Boolean);
+  const blockedSenderIds = process.env.DSH_LARK_BLOCKED_SENDERS?.split(",")
+    .map((senderId) => senderId.trim())
+    .filter(Boolean);
+  return new EventAdmissionStore(
+    new JsonFileAdmissionAdapter(
+      process.env.DSH_LARK_EVENT_STATE_PATH?.trim() ||
+        defaultAdmissionStatePath(),
+    ),
+    {
+      ...(allowedSenderIds === undefined ? {} : { allowedSenderIds }),
+      ...(blockedSenderIds === undefined ? {} : { blockedSenderIds }),
+      retentionMs: positiveEnvironmentInteger(
+        "DSH_LARK_EVENT_RETENTION_MS",
+        604_800_000,
+      ),
+    },
+  );
 }
 
 async function doctor(baseUrl: string): Promise<void> {
@@ -75,6 +118,14 @@ async function run(): Promise<void> {
   const baseUrl = option("--url", DEFAULT_DSH_URL);
   const maxEvents = numberOption("--max-events", command === "start" ? 0 : 1);
   const timeout = option("--timeout", command === "start" ? "0" : "5m");
+  const maxConcurrentTopics = positiveEnvironmentInteger(
+    "DSH_LARK_MAX_CONCURRENT_TOPICS",
+    4,
+  );
+  const maxPendingMessages = positiveEnvironmentInteger(
+    "DSH_LARK_MAX_PENDING_MESSAGES",
+    256,
+  );
   const shutdown = new AbortController();
   const abort = () => shutdown.abort();
   process.once("SIGINT", abort);
@@ -92,10 +143,15 @@ async function run(): Promise<void> {
       lark: new LarkSdkTransport({
         credentials: resolveLarkCredentials(),
         logger: larkLogger,
+        maxPendingMessages,
       }),
       maxEvents,
       timeout,
       signal: shutdown.signal,
+      admission: standaloneAdmission(),
+      maxConcurrentTopics,
+      maxPendingMessages,
+      logger: larkLogger,
     });
     console.log(`handled_messages=${handled}`);
     return;
@@ -109,7 +165,9 @@ async function run(): Promise<void> {
       await Promise.race([
         host.wait(),
         new Promise<void>((resolve) =>
-          shutdown.signal.addEventListener("abort", () => resolve(), { once: true }),
+          shutdown.signal.addEventListener("abort", () => resolve(), {
+            once: true,
+          }),
         ),
       ]);
     } finally {
@@ -122,20 +180,41 @@ async function run(): Promise<void> {
   }
 
   await doctor(host.baseUrl);
+  const admission = standaloneAdmission();
+  const supervisor = new ConsumerSupervisor({ logger: larkLogger });
   try {
     await host.start();
-    const handled = await runBridge({
-      client: new DshClient(host.baseUrl),
-      lark: new LarkSdkTransport({
-        credentials: resolveLarkCredentials(),
+    let handled = 0;
+    await supervisor.start(async (signal, onReady) => {
+      handled += await runBridge({
+        client: new DshClient(host.baseUrl),
+        lark: new LarkSdkTransport({
+          credentials: resolveLarkCredentials(),
+          logger: larkLogger,
+          maxPendingMessages,
+        }),
+        maxEvents,
+        timeout,
+        signal,
+        admission,
+        maxConcurrentTopics,
+        maxPendingMessages,
         logger: larkLogger,
-      }),
-      maxEvents,
-      timeout,
-      signal: shutdown.signal,
+        onReady,
+      });
+      if (maxEvents > 0) shutdown.abort();
     });
+    const aborted = shutdown.signal.aborted
+      ? Promise.resolve()
+      : new Promise<void>((resolve) =>
+          shutdown.signal.addEventListener("abort", () => resolve(), {
+            once: true,
+          }),
+        );
+    await Promise.race([supervisor.wait(), host.wait(), aborted]);
     console.log(`handled_messages=${handled}`);
   } finally {
+    await supervisor.stop();
     await host.stop();
   }
 }
