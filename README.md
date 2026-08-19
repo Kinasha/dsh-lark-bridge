@@ -94,49 +94,9 @@ git clone https://github.com/Kinasha/dsh-lark-bridge.git
 cd dsh-lark-bridge
 npm ci
 npm pack
-dsh plugin --profile web add ./open-aiden-dsh-lark-bridge-0.0.8.tgz \
+dsh plugin --profile web add ./open-aiden-dsh-lark-bridge-0.0.9.tgz \
   --allow-build=protobufjs
 ```
-
-### 从 ByteDance 内部 registry 安装
-
-可以访问 bnpm 的用户也可以直接安装已发布的包：
-
-```bash
-dsh plugin --profile web add @open-aiden/dsh-lark-bridge@0.0.8 \
-  --registry=https://bnpm.byted.org \
-  --allow-build=protobufjs
-```
-
-`protobufjs` 是飞书 SDK 的传递依赖，并声明了 `postinstall`。DSH 的 pnpm 供应链
-门禁要求安装者显式允许这个脚本，因此首次安装需要上述 `--allow-build` 参数；这不
-会增加运行时配置项。
-
-设置飞书凭证。建议在启动 DSH 的同一个终端中执行：
-
-```bash
-export LARK_APP_ID=cli_xxx
-export LARK_APP_SECRET=xxx
-```
-
-运行自检：
-
-```bash
-dsh plugin --profile web exec dsh-lark-bridge doctor
-```
-
-成功输出包含：
-
-```json
-{
-  "larkBot": "ready",
-  "larkAppId": "present",
-  "larkAppSecret": "present"
-}
-```
-
-`doctor` 会用 App ID 和 App Secret 请求当前 bot identity，但不会输出 App
-Secret；同时会报告当前进程是否能看到 `DEEPSEEK_API_KEY`。
 
 ## 3. 启动 DSH
 
