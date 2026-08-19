@@ -1,5 +1,5 @@
-import { sessionIdForTopic, type DshBridgeClient } from "./dsh-client.js";
-import { DshTopicTurn } from "./dsh-topic-turn.js";
+import { sessionIdForTopic, type DshBridgeClient } from "../dsh/client.js";
+import { DshTopicTurn } from "./topic-turn.js";
 import {
   type AdmissionDecision,
   EventAdmissionStore,
@@ -10,14 +10,14 @@ import {
   type LarkMessage,
   type LarkMessageTransport,
   topicRootMessageId,
-} from "./lark.js";
-import type { SemanticLogger } from "./logger.js";
-import { WORKSPACE_PATH } from "./config.js";
+} from "../lark/transport.js";
+import type { SemanticLogger } from "../logger.js";
+import { WORKSPACE_PATH } from "../config.js";
 import { TopicScheduler } from "./topic-scheduler.js";
 import {
   LarkReplyChannel,
   type ReplySession,
-} from "./lark-reply.js";
+} from "../card/reply.js";
 import { WebMessageSync } from "./web-message-sync.js";
 
 /**
@@ -239,12 +239,15 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
   );
   const quota = new CompletionQuota(options.maxEvents ?? 0);
   const turn = new DshTopicTurn(options.client);
-  const webSync = new WebMessageSync(
-    options.client,
-    options.lark,
+  const webSync = new WebMessageSync({
+    client: options.client,
+    lark: options.lark,
     logger,
-    options.enableWebCot ?? true,
-  );
+    enableCot: options.enableWebCot ?? true,
+    // The mirrored chain and a Feishu-initiated one are the same surface, so
+    // they read the same presentation settings.
+    progressOptions: () => replyChannel.progressOptions(),
+  });
   let storedTopicLinks: LarkTopicLink[] = [];
   try {
     storedTopicLinks = await admission.topicLinks();
@@ -460,7 +463,18 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
                   });
                 },
                 onEvents: async (events) => {
-                  await reply?.present(events);
+                  try {
+                    await reply?.present(events);
+                  } catch (error) {
+                    // Progress is decoration. A surface that cannot render it
+                    // must not take the answer down with it.
+                    logger.warn("progress_present_failed", {
+                      eventId: message.eventId,
+                      sessionId,
+                      errorName:
+                        error instanceof Error ? error.name : typeof error,
+                    });
+                  }
                 },
                 onQuestion: async (event) => {
                   if (options.enableQuestions === false) return;
@@ -475,11 +489,21 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
                   }
                 },
                 onResolved: async (event) => {
-                  if (event.type === "question/resolved") {
+                  if (event.type !== "question/resolved") return;
+                  try {
                     await options.questionAnswers?.resolve?.(
                       event.sessionId,
                       event.questionRpcId,
                     );
+                  } catch (error) {
+                    // Withdrawing an answered question is cleanup, not part of
+                    // delivering the turn.
+                    logger.warn("question_cleanup_failed", {
+                      sessionId: event.sessionId,
+                      questionRpcId: event.questionRpcId,
+                      errorName:
+                        error instanceof Error ? error.name : typeof error,
+                    });
                   }
                 },
               });
@@ -625,7 +649,13 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
     });
   } finally {
     stop();
-    await webSyncTask;
+    // The mirror is a background follower; letting it reject here would
+    // replace whatever error actually stopped the consumer.
+    await webSyncTask.catch((error: unknown) => {
+      logger.warn("web_sync_stopped_with_error", {
+        errorName: error instanceof Error ? error.name : typeof error,
+      });
+    });
     quota.close(new Error("bridge stopped"));
     scheduler.close();
     await scheduler.drain();

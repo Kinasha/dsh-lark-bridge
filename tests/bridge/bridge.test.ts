@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { runBridge, guardSlashCommand } from "../src/bridge.js";
+import { runBridge, guardSlashCommand } from "../../src/bridge/bridge.js";
 import type {
   WaitForTurnOptions,
   CompletedTurn,
@@ -8,16 +8,16 @@ import type {
   EnsuredSession,
   SessionEvent,
   WorkspaceView,
-} from "../src/dsh-client.js";
-import { sessionIdForTopic } from "../src/dsh-client.js";
-import type { CotEvent, CotWriterPort } from "../src/cot.js";
+} from "../../src/dsh/client.js";
+import { sessionIdForTopic } from "../../src/dsh/client.js";
+import type { CotEvent, CotWriterPort } from "../../src/progress/cot.js";
 import type {
   LarkMessage,
   LarkMessageTransport,
   LarkReplyResult,
   LarkReplyRoute,
-} from "../src/lark.js";
-import { LarkUserAuthorizationUnavailableError } from "../src/lark.js";
+} from "../../src/lark/transport.js";
+import { LarkUserAuthorizationUnavailableError } from "../../src/lark/transport.js";
 
 class FakeDshClient implements DshBridgeClient {
   readonly sessionIds: string[] = [];

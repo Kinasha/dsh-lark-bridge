@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ConsumerSupervisor } from "../src/consumer-supervisor.js";
+import { ConsumerSupervisor } from "../../src/bridge/consumer-supervisor.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;

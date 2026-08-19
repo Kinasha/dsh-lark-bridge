@@ -1,25 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { runBridge } from "../src/bridge.js";
+import { runBridge } from "../../src/bridge/bridge.js";
 import {
   type AdmissionAdapter,
   EventAdmissionStore,
   MemoryAdmissionAdapter,
-} from "../src/event-admission.js";
+} from "../../src/bridge/event-admission.js";
 import type {
   CompletedTurn,
   DshBridgeClient,
   EnsuredSession,
   WaitForTurnOptions,
   WorkspaceView,
-} from "../src/dsh-client.js";
-import type { CotWriterPort } from "../src/cot.js";
+} from "../../src/dsh/client.js";
+import type { CotWriterPort } from "../../src/progress/cot.js";
 import type {
   LarkMessage,
   LarkMessageTransport,
   LarkReplyResult,
   LarkReplyRoute,
-} from "../src/lark.js";
+} from "../../src/lark/transport.js";
 
 function deferred() {
   let resolve!: () => void;

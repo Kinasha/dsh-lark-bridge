@@ -1,20 +1,43 @@
+/**
+ * Mirrors a DSH session's Web-side traffic back into the Feishu topic it is
+ * linked to: the user's Web message, the turn's thinking chain, and the final
+ * answer.
+ *
+ * The mirror is a *tail follower*, so its failure modes are about not getting
+ * stuck. Two rules keep one bad event from wedging a topic forever:
+ *
+ *   - A poll that throws backs the topic off instead of retrying every tick.
+ *   - An event that keeps throwing is abandoned after a few attempts, and the
+ *     cursor moves past it, because a topic that cannot advance mirrors nothing
+ *     ever again.
+ */
+
 import {
   historySince,
   type DshBridgeClient,
   type SessionEvent,
-} from "./dsh-client.js";
-import { DshCotProjection } from "./cot.js";
+} from "../dsh/client.js";
+import { DshCotProjection } from "../progress/cot.js";
 import type { BridgeLogger } from "./bridge.js";
+import { finalReplyText } from "../card/stream.js";
+import type { TurnProgressOptions } from "../progress/turn-progress.js";
 import {
   type LarkMessageTransport,
   type LarkReplyResult,
-} from "./lark.js";
+} from "../lark/transport.js";
 
 interface LinkedTopic {
   topicRootMessageId: string;
   chatId?: string;
   afterSeq: number;
   turn?: TurnMirror;
+  /** Consecutive failed polls; drives this topic's backoff. */
+  failures: number;
+  /** Epoch milliseconds before which this topic is not polled again. */
+  retryAt: number;
+  /** The one event currently failing, and how often it has been tried. */
+  blockedSeq?: number;
+  blockedAttempts: number;
 }
 
 interface TurnMirror {
@@ -32,6 +55,14 @@ const INTERRUPTED_REASON_KINDS = new Set([
   "cancelled",
   "interrupted",
 ]);
+/** Attempts on one event before the mirror gives up and moves past it. */
+const MAX_EVENT_ATTEMPTS = 3;
+const MAX_TOPIC_BACKOFF_MS = 30_000;
+/**
+ * Bridge prompts awaiting their `user/message` echo. A prompt whose turn never
+ * reached history would otherwise keep its rpcId forever.
+ */
+const MAX_TRACKED_BRIDGE_PROMPTS = 256;
 
 function turnFor(topic: LinkedTopic): TurnMirror {
   return (topic.turn ??= {
@@ -131,17 +162,38 @@ function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+export interface WebMessageSyncOptions {
+  client: DshBridgeClient;
+  lark: LarkMessageTransport;
+  logger: BridgeLogger;
+  /** Mirror Web-originated progress through the native Feishu COT chain. */
+  enableCot?: boolean;
+  pollMs?: number;
+  /**
+   * Read per turn, so the mirrored chain honors the same presentation settings
+   * as a Feishu-initiated one — including a setting changed mid-session.
+   */
+  progressOptions?: () => TurnProgressOptions;
+}
+
 export class WebMessageSync {
   private readonly topics = new Map<string, LinkedTopic>();
   private readonly bridgePromptRpcIds = new Set<string>();
+  private readonly client: DshBridgeClient;
+  private readonly lark: LarkMessageTransport;
+  private readonly logger: BridgeLogger;
+  private readonly enableCot: boolean;
+  private readonly pollMs: number;
+  private readonly progressOptions: () => TurnProgressOptions;
 
-  constructor(
-    private readonly client: DshBridgeClient,
-    private readonly lark: LarkMessageTransport,
-    private readonly logger: BridgeLogger,
-    private readonly enableCot = true,
-    private readonly pollMs = 500,
-  ) {}
+  constructor(options: WebMessageSyncOptions) {
+    this.client = options.client;
+    this.lark = options.lark;
+    this.logger = options.logger;
+    this.enableCot = options.enableCot ?? true;
+    this.pollMs = options.pollMs ?? 500;
+    this.progressOptions = options.progressOptions ?? (() => ({}));
+  }
 
   link(
     sessionId: string,
@@ -154,6 +206,9 @@ export class WebMessageSync {
       this.topics.set(sessionId, {
         topicRootMessageId,
         afterSeq,
+        failures: 0,
+        retryAt: 0,
+        blockedAttempts: 0,
         ...(chatId === undefined ? {} : { chatId }),
       });
     } else {
@@ -164,17 +219,36 @@ export class WebMessageSync {
 
   markBridgePrompt(rpcId: string): void {
     this.bridgePromptRpcIds.add(rpcId);
+    while (this.bridgePromptRpcIds.size > MAX_TRACKED_BRIDGE_PROMPTS) {
+      const oldest = this.bridgePromptRpcIds.values().next();
+      if (oldest.done === true) break;
+      this.bridgePromptRpcIds.delete(oldest.value);
+    }
   }
 
   async run(signal: AbortSignal): Promise<void> {
     while (!signal.aborted) {
       for (const [sessionId, topic] of this.topics) {
         if (signal.aborted) return;
+        if (Date.now() < topic.retryAt) continue;
         try {
           await this.pollTopic(sessionId, topic);
+          topic.failures = 0;
+          topic.retryAt = 0;
         } catch (error) {
+          topic.failures += 1;
+          // Backing off matters more than the retry: a session that has been
+          // deleted fails on every poll, and hammering it at the poll interval
+          // buries every other topic's log line.
+          const backoffMs = Math.min(
+            MAX_TOPIC_BACKOFF_MS,
+            this.pollMs * 2 ** Math.min(topic.failures, 6),
+          );
+          topic.retryAt = Date.now() + backoffMs;
           this.logger.warn("web_sync_failed", {
             sessionId,
+            failures: topic.failures,
+            retryInMs: backoffMs,
             errorName: error instanceof Error ? error.name : typeof error,
           });
         }
@@ -198,7 +272,27 @@ export class WebMessageSync {
       topic.afterSeq,
     );
     for (const event of events.filter((item) => item.seq > topic.afterSeq)) {
-      await this.presentEvent(sessionId, topic, event);
+      try {
+        await this.presentEvent(sessionId, topic, event);
+      } catch (error) {
+        if (topic.blockedSeq !== event.seq) {
+          topic.blockedSeq = event.seq;
+          topic.blockedAttempts = 0;
+        }
+        topic.blockedAttempts += 1;
+        if (topic.blockedAttempts < MAX_EVENT_ATTEMPTS) throw error;
+        // Everything after this event would otherwise never be mirrored. Drop
+        // the one event, loudly, and keep the topic moving.
+        this.logger.error("web_sync_event_abandoned", {
+          sessionId,
+          eventSeq: event.seq,
+          eventType: event.type,
+          attempts: topic.blockedAttempts,
+          errorName: error instanceof Error ? error.name : typeof error,
+        });
+        delete topic.blockedSeq;
+        topic.blockedAttempts = 0;
+      }
       topic.afterSeq = event.seq;
     }
   }
@@ -274,6 +368,7 @@ export class WebMessageSync {
             cotMessage.writer,
             `web:${sessionId}:${event.seq}`,
             mirrored.messageId,
+            this.progressOptions(),
           );
           turn.cot = cot;
           await cot.start(prompt.text);
@@ -335,7 +430,10 @@ export class WebMessageSync {
     if (event.type !== "turn/end") return;
     const turn = topic.turn;
     if (turn?.hasWebPrompt && !turn.hasBridgePrompt) {
-      await turn.cot?.finish(cotOutcome(event)).catch((error: unknown) => {
+      const outcome = cotOutcome(event);
+      const cot = turn.cot;
+      delete turn.cot;
+      await cot?.finish(outcome).catch((error: unknown) => {
         this.logger.warn("web_cot_finish_failed", {
           sessionId,
           eventSeq: event.seq,
@@ -347,7 +445,7 @@ export class WebMessageSync {
           sourceMessageId: `web-assistant:${sessionId}:${event.seq}`,
           topicRootMessageId: topic.topicRootMessageId,
         },
-        turn.assistantText,
+        finalReplyText(turn.assistantText, outcome),
       );
       this.logger.info("web_message_mirrored", {
         sessionId,

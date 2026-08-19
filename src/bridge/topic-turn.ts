@@ -3,8 +3,8 @@ import type {
   CompletedTurn,
   DshBridgeClient,
   SessionEvent,
-} from "./dsh-client.js";
-import type { MuxEvent } from "./session-event-stream.js";
+} from "../dsh/client.js";
+import type { MuxEvent } from "../dsh/session-event-stream.js";
 
 export interface DshTopicTurnInput {
   sessionId: string;

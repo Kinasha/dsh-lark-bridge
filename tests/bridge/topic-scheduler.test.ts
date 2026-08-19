@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TopicScheduler } from "../src/topic-scheduler.js";
+import { TopicScheduler } from "../../src/bridge/topic-scheduler.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;

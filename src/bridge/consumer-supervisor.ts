@@ -1,4 +1,4 @@
-import { silentLogger, type SemanticLogger } from "./logger.js";
+import { silentLogger, type SemanticLogger } from "../logger.js";
 
 export type ConsumerState =
   | "idle"

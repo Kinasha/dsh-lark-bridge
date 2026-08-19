@@ -7,7 +7,7 @@ import {
   EventAdmissionStore,
   JsonFileAdmissionAdapter,
   MemoryAdmissionAdapter,
-} from "../src/event-admission.js";
+} from "../../src/bridge/event-admission.js";
 
 test("event admission rejects senders outside the allowlist", async () => {
   const store = new EventAdmissionStore(new MemoryAdmissionAdapter(), {

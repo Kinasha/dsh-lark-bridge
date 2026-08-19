@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DshTopicTurn } from "../src/dsh-topic-turn.js";
+import { DshTopicTurn } from "../../src/bridge/topic-turn.js";
 import type {
   CompletedTurn,
   DshBridgeClient,
   EnsuredSession,
   WaitForTurnOptions,
   WorkspaceView,
-} from "../src/dsh-client.js";
-import type { MuxEvent } from "../src/session-event-stream.js";
+} from "../../src/dsh/client.js";
+import type { MuxEvent } from "../../src/dsh/session-event-stream.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
