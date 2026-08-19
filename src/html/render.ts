@@ -5,7 +5,7 @@
  * minus HTMLBlock plus a ten-tag allowlist, and `post` messages reject raw HTML
  * outright. So an agent-authored HTML report has to be *translated*, not
  * embedded. This module produces the readable inline approximation; the
- * full-fidelity original is served by `lark-html-host.ts` behind an AppLink
+ * full-fidelity original is served by `html/host.ts` behind an AppLink
  * button, and the two are meant to be used together.
  *
  * Everything emitted here passes through `sanitizeCardMarkdown`, so the
@@ -23,13 +23,13 @@ import {
   type CardElement,
   type CardTableColumn,
   type CardTableElement,
-} from "./lark-card.js";
+} from "../card/schema.js";
 import {
   parseHtml,
   textContent,
   type HtmlElementNode,
   type HtmlNode,
-} from "./lark-html-parse.js";
+} from "./parse.js";
 
 /** Headroom under the 200-component cap. */
 export const DEFAULT_MAX_ELEMENTS = 120;

@@ -10,7 +10,7 @@ import {
   registerLarkHtmlReportWeb,
   REPORT_CSP,
   type LarkHtmlWebPort,
-} from "../src/lark-html-host.js";
+} from "../../src/html/host.js";
 
 interface Captured {
   statusCode: number;
