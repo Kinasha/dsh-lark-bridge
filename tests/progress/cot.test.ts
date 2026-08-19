@@ -6,7 +6,7 @@ import {
   LarkCotGateway,
   type CotApiClientPort,
   type CotEvent,
-} from "../src/cot.js";
+} from "../../src/progress/cot.js";
 
 test("COT writer preserves order, makes timestamps monotonic, and completes", async () => {
   const batches: CotEvent[][] = [];
@@ -139,5 +139,65 @@ test("DSH COT projection exposes lifecycle summaries, not tool arguments or resu
   const serialized = JSON.stringify(events);
   assert.equal(serialized.includes("SECRET_ARG"), false);
   assert.equal(serialized.includes("SECRET_RESULT"), false);
+  assert.deepEqual(completed, ["done"]);
+});
+
+test("a rejected batch does not discard the batches queued behind it", async () => {
+  const sent: string[][] = [];
+  const writer = new CotWriter(
+    async (events) => {
+      const types = events.map((event) => event.eventType);
+      if (types[0] === "B") throw new Error("message_cot.update failed");
+      sent.push(types);
+    },
+    async () => undefined,
+  );
+
+  // One write past the per-request ceiling, so the drain carries three batches
+  // and the middle one fails on both attempts.
+  writer.write(...Array.from({ length: 50 }, () => ({ eventType: "A", content: {} })));
+  writer.write(...Array.from({ length: 50 }, () => ({ eventType: "B", content: {} })));
+  writer.write(...Array.from({ length: 50 }, () => ({ eventType: "C", content: {} })));
+
+  await assert.rejects(() => writer.flush(), /message_cot\.update failed/);
+  assert.deepEqual(
+    sent.map((batch) => batch[0]),
+    ["A", "C"],
+    "the batch after the failure still reaches Feishu",
+  );
+});
+
+test("a rejected payload is not retried, an unexplained failure is", async () => {
+  const attempts: string[] = [];
+  const invalid = Object.assign(new Error("bad params"), { code: 230001 });
+  const writer = new CotWriter(
+    async (events) => {
+      const type = String(events[0]?.eventType);
+      attempts.push(type);
+      throw type === "INVALID" ? invalid : new Error("transient");
+    },
+    async () => undefined,
+  );
+
+  writer.write({ eventType: "INVALID", content: {} });
+  await assert.rejects(() => writer.flush(), /bad params/);
+  assert.deepEqual(attempts, ["INVALID"], "a rejected payload stays rejected");
+
+  attempts.length = 0;
+  writer.write({ eventType: "TRANSIENT", content: {} });
+  await assert.rejects(() => writer.flush(), /transient/);
+  assert.deepEqual(attempts, ["TRANSIENT", "TRANSIENT"]);
+});
+
+test("completing twice writes one completion", async () => {
+  const completed: string[] = [];
+  const writer = new CotWriter(
+    async () => undefined,
+    async (reason) => {
+      completed.push(reason);
+    },
+  );
+  await writer.complete("done");
+  await writer.complete("error");
   assert.deepEqual(completed, ["done"]);
 });

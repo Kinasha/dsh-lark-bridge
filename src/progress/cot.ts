@@ -1,4 +1,26 @@
-import type { SessionEvent } from "./dsh-client.js";
+/**
+ * The native Feishu `message_cot` thinking chain.
+ *
+ * This is the thinking-chain surface every turn uses by default — the one a
+ * Feishu-initiated turn shows and the one a turn typed in the DSH Web UI is
+ * mirrored into. Both read the same {@link TurnProgressProjection}, so the two
+ * paths cannot drift apart in what they call a tool or when they close one.
+ *
+ * The writer batches, because `message_cot.update` is rate limited, and it
+ * keeps timestamps strictly increasing, because Feishu orders the chain by
+ * them. Every failure is contained: a rejected batch never swallows the batches
+ * queued behind it, and a wedged endpoint surfaces at `flush()` instead of
+ * growing without bound.
+ */
+
+import type { SessionEvent } from "../dsh/client.js";
+import type { ToolDetailMode } from "../settings/schema.js";
+import {
+  TurnProgressProjection,
+  toolPresentation,
+  type ProgressStep,
+  type TurnProgressOptions,
+} from "./turn-progress.js";
 
 const COT_API_URL =
   "https://fsopen.bytedance.net/open-apis/im/v1/message_cot";
@@ -6,7 +28,15 @@ const MIN_BATCH_INTERVAL_MS = 65;
 const MAX_EVENTS_PER_REQUEST = 50;
 const MAX_EVENT_TEXT_LENGTH = 3_000;
 const WRITE_RETRY_DELAY_MS = 300;
+const WRITE_ATTEMPTS = 2;
+/**
+ * Events accepted but not yet written. A wedged `message_cot.update` would
+ * otherwise let one turn's backlog grow for as long as the turn runs.
+ */
+const MAX_QUEUED_EVENTS = 500;
 const COT_PARAM_INVALID_CODE = 230001;
+
+export { toolPresentation };
 
 export interface CotEvent {
   eventType: string;
@@ -38,11 +68,20 @@ export interface CotApiClientPort {
 type WriteBatch = (events: CotEvent[]) => Promise<void>;
 type CompleteCot = (reason: "done" | "error" | "timeout") => Promise<void>;
 
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, milliseconds);
+    (timer as { unref?: () => void }).unref?.();
+  });
+}
+
 export class CotWriter implements CotWriterPort {
   private pending: CotEvent[] = [];
   private timer: ReturnType<typeof setTimeout> | undefined;
   private operations: Promise<void> = Promise.resolve();
   private drainErrors: unknown[] = [];
+  private queued = 0;
+  private dropped = 0;
   private lastBatchStartedAt = 0;
   private lastEventTimestamp = 0;
   private completed = false;
@@ -55,21 +94,31 @@ export class CotWriter implements CotWriterPort {
   write(...events: CotEvent[]): void {
     if (this.completed) return;
     for (const item of events) {
+      if (this.queued >= MAX_QUEUED_EVENTS) {
+        this.dropped += 1;
+        continue;
+      }
       const timestamp = Math.max(
         item.timestamp ?? Date.now(),
         this.lastEventTimestamp + 1,
       );
       this.lastEventTimestamp = timestamp;
+      this.queued += 1;
       this.pending.push({ ...item, timestamp });
     }
     if (this.pending.length >= MAX_EVENTS_PER_REQUEST) {
       this.scheduleDrain();
       return;
     }
-    this.timer ??= setTimeout(() => {
-      this.timer = undefined;
-      this.scheduleDrain();
-    }, MIN_BATCH_INTERVAL_MS);
+    if (this.pending.length === 0) return;
+    if (this.timer === undefined) {
+      this.timer = setTimeout(() => {
+        this.timer = undefined;
+        this.scheduleDrain();
+      }, MIN_BATCH_INTERVAL_MS);
+      // A pending batch must never hold the process open on shutdown.
+      (this.timer as { unref?: () => void }).unref?.();
+    }
   }
 
   async flush(): Promise<void> {
@@ -80,6 +129,13 @@ export class CotWriter implements CotWriterPort {
     this.scheduleDrain();
     await this.operations;
     const errors = this.drainErrors.splice(0);
+    const dropped = this.dropped;
+    this.dropped = 0;
+    if (dropped > 0) {
+      errors.push(
+        new Error(`COT writer dropped ${dropped} events: the backlog is full`),
+      );
+    }
     if (errors.length === 1) throw errors[0];
     if (errors.length > 1) {
       throw new AggregateError(errors, "Failed to write COT event batches");
@@ -87,6 +143,7 @@ export class CotWriter implements CotWriterPort {
   }
 
   async complete(reason: "done" | "error" | "timeout"): Promise<void> {
+    if (this.completed) return;
     this.completed = true;
     let flushError: unknown;
     try {
@@ -121,11 +178,17 @@ export class CotWriter implements CotWriterPort {
             0,
             MIN_BATCH_INTERVAL_MS - (Date.now() - this.lastBatchStartedAt),
           );
-          if (waitMs > 0) {
-            await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
-          }
+          if (waitMs > 0) await sleep(waitMs);
           this.lastBatchStartedAt = Date.now();
-          await this.sendBatch(batch);
+          try {
+            await this.sendBatch(batch);
+          } catch (error) {
+            // One rejected batch must not discard the batches queued behind
+            // it: the chain would then be missing its closing tool events.
+            this.drainErrors.push(error);
+          } finally {
+            this.queued = Math.max(0, this.queued - batch.length);
+          }
         }
       })
       .catch((error: unknown) => {
@@ -134,14 +197,19 @@ export class CotWriter implements CotWriterPort {
   }
 
   private async sendBatch(batch: CotEvent[]): Promise<void> {
-    try {
-      await this.writeBatch(batch);
-    } catch (error) {
-      if ((error as { code?: number } | undefined)?.code === COT_PARAM_INVALID_CODE) {
-        throw error;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await this.writeBatch(batch);
+        return;
+      } catch (error) {
+        const code = (error as { code?: number } | undefined)?.code;
+        // A rejected payload is rejected on every retry; only spend attempts
+        // on failures a retry can plausibly clear.
+        if (code === COT_PARAM_INVALID_CODE || attempt >= WRITE_ATTEMPTS) {
+          throw error;
+        }
+        await sleep(WRITE_RETRY_DELAY_MS * attempt);
       }
-      await new Promise<void>((resolve) => setTimeout(resolve, WRITE_RETRY_DELAY_MS));
-      await this.writeBatch(batch);
     }
   }
 }
@@ -162,7 +230,7 @@ function assertSuccess(value: unknown, operation: string): CotApiResponse {
   const parsed = response(value);
   if (parsed.code === undefined || parsed.code === 0) return parsed;
   const error = new Error(
-    `${operation} failed: ${parsed.msg ?? "unknown COT error"}`,
+    `${operation} failed (${parsed.code}): ${parsed.msg ?? "unknown COT error"}`,
   ) as Error & { code: number };
   error.code = parsed.code;
   throw error;
@@ -175,14 +243,19 @@ export class LarkCotGateway {
     chatId: string;
     sourceMessageId: string;
   }): Promise<CotMessage> {
+    const chatId = input.chatId.trim();
+    const sourceMessageId = input.sourceMessageId.trim();
+    if (!chatId || !sourceMessageId) {
+      throw new Error("message_cot.create needs a chat id and a source message");
+    }
     const created = assertSuccess(
       await this.client.request({
         url: COT_API_URL,
         method: "POST",
         params: { receive_id_type: "chat_id" },
         data: {
-          receive_id: input.chatId,
-          origin_message_id: input.sourceMessageId,
+          receive_id: chatId,
+          origin_message_id: sourceMessageId,
         },
       }),
       "message_cot.create",
@@ -241,16 +314,6 @@ export class LarkCotGateway {
   }
 }
 
-function object(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function string(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
 function cotEvent(
   eventType: string,
   content: Record<string, unknown>,
@@ -258,18 +321,12 @@ function cotEvent(
   return { eventType, content };
 }
 
-/** Shared by the COT and card progress projections so labels stay identical. */
-export function toolPresentation(name: string): { title: string; icon: string } {
-  if (name === "read") return { title: "读取文件", icon: "read" };
-  if (name === "glob") return { title: "查找文件", icon: "search" };
-  if (name === "grep") return { title: "搜索文件内容", icon: "search" };
-  return { title: `调用 ${name}`, icon: "default" };
-}
+export type DshCotProjectionOptions = TurnProgressOptions;
 
 /** Projects safe DSH lifecycle summaries into one native Feishu COT message. */
 export class DshCotProjection {
-  private readonly seenSeqs = new Set<number>();
-  private readonly openTools = new Map<string, string>();
+  private readonly progress: TurnProgressProjection;
+  private readonly toolDetailMode: ToolDetailMode;
   private reasoningStarted = false;
   private reasoningSequence = 0;
   private finished = false;
@@ -278,7 +335,13 @@ export class DshCotProjection {
     private readonly writer: CotWriterPort,
     private readonly runId: string,
     private readonly sourceMessageId: string,
-  ) {}
+    options: DshCotProjectionOptions = {},
+  ) {
+    this.toolDetailMode = options.toolDetailMode ?? "standard";
+    this.progress = new TurnProgressProjection({
+      toolDetailMode: this.toolDetailMode,
+    });
+  }
 
   async start(query: string): Promise<void> {
     const normalized = query.trim().slice(0, MAX_EVENT_TEXT_LENGTH);
@@ -293,38 +356,8 @@ export class DshCotProjection {
   }
 
   async present(events: SessionEvent[]): Promise<void> {
-    for (const item of events.toSorted((left, right) => left.seq - right.seq)) {
-      if (this.seenSeqs.has(item.seq)) continue;
-      this.seenSeqs.add(item.seq);
-      const data = object(item.data);
-      if (item.type === "step/start") {
-        this.writeReasoning(
-          this.reasoningSequence === 0
-            ? "正在分析任务…"
-            : "正在根据执行结果继续分析…",
-        );
-      } else if (item.type === "tool/call" && data !== undefined) {
-        const callId = string(data.callId);
-        const name = string(data.name);
-        if (callId && name && !this.openTools.has(callId)) {
-          this.openTools.set(callId, name);
-          const presentation = toolPresentation(name);
-          this.writer.write(
-            cotEvent("TOOL_CALL_START", {
-              toolCallId: callId,
-              toolCallName: name,
-              title: presentation.title,
-              icon: presentation.icon,
-            }),
-          );
-        }
-      } else if (item.type === "tool/result" && data !== undefined) {
-        const callId = string(data.callId);
-        if (callId && this.openTools.delete(callId)) {
-          this.writer.write(cotEvent("TOOL_CALL_END", { toolCallId: callId }));
-        }
-      }
-    }
+    if (this.finished) return;
+    for (const step of this.progress.present(events)) this.emit(step);
     await this.writer.flush();
   }
 
@@ -333,14 +366,11 @@ export class DshCotProjection {
   ): Promise<void> {
     if (this.finished) return;
     this.finished = true;
-    for (const callId of this.openTools.keys()) {
-      this.writer.write(cotEvent("TOOL_CALL_END", { toolCallId: callId }));
-    }
-    this.openTools.clear();
+    // A turn can end with tools still in flight; the chain must not be left
+    // showing them as running.
+    for (const step of this.progress.close()) this.emit(step);
     if (this.reasoningStarted) {
-      this.writer.write(
-        cotEvent("REASONING_END", { messageId: "reasoning" }),
-      );
+      this.writer.write(cotEvent("REASONING_END", { messageId: "reasoning" }));
     }
     if (outcome === "error" || outcome === "timeout") {
       this.writer.write(
@@ -360,6 +390,28 @@ export class DshCotProjection {
       }),
     );
     await this.writer.complete("done");
+  }
+
+  private emit(step: ProgressStep): void {
+    if (step.kind === "reasoning") {
+      this.writeReasoning(step.text);
+      return;
+    }
+    // Both halves are dropped together; a `TOOL_CALL_START` with no matching
+    // end is a tool the reader watches spin for the rest of the turn.
+    if (this.toolDetailMode === "hidden") return;
+    if (step.kind === "tool-start") {
+      this.writer.write(
+        cotEvent("TOOL_CALL_START", {
+          toolCallId: step.callId,
+          toolCallName: step.name,
+          title: step.title,
+          icon: step.icon,
+        }),
+      );
+      return;
+    }
+    this.writer.write(cotEvent("TOOL_CALL_END", { toolCallId: step.callId }));
   }
 
   private writeReasoning(content: string): void {
