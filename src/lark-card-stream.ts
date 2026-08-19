@@ -604,7 +604,9 @@ export class CardStepsProjection {
         const name = typeof data.name === "string" ? data.name.trim() : "";
         if (callId && name && !this.openTools.has(callId)) {
           const viewTitle =
-            event.view?.for === "call" ? oneLine(event.view.view.title) : undefined;
+            event.view?.for === "call" && event.view.view.card !== "terminal"
+              ? oneLine(event.view.view.title)
+              : undefined;
           const title =
             this.options.toolDetailMode === "compact"
               ? toolPresentation(name).title

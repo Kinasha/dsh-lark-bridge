@@ -34,8 +34,11 @@ steps and tool calls remain interleaved. It exposes:
 add only fields already approved by DSH's `ToolEventView`, such as paths, working
 directory, exit status, signal, and aggregate counts. The bridge never renders
 raw tool arguments, terminal output, file contents, search excerpts, or diff
-bodies. Tool starts and results are correlated by call ID, including the nested
-message form used by session history.
+bodies. Because `TerminalCallView.title` is the command itself, terminal calls
+always use the bridge's fixed tool label instead. Incoming views are normalized
+as a complete tagged union and content-bearing fields are discarded before they
+reach the projection. Tool starts and results are correlated by call ID,
+including the nested message form used by session history.
 
 The three layouts are built from legal Card JSON 2.0 Markdown and collapsible
 panel content rather than pretending Feishu has a native timeline component.

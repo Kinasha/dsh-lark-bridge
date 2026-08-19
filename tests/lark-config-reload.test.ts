@@ -57,7 +57,7 @@ test("structural settings dispose the old runtime before starting the replacemen
   assert.equal(requiresRuntimeReload(initial, updated), true);
   assert.deepEqual(events, [
     "start:/workspace/a",
-    "dispose:/workspace/b",
+    "dispose:/workspace/a",
     "start:/workspace/b",
   ]);
   await reloader.close();
@@ -79,4 +79,33 @@ test("a forced reload rebuilds an unchanged runtime and close is idempotent", as
 
   assert.equal(starts, 2);
   assert.equal(disposals, 2);
+});
+
+test("a failed disposal rejects one apply without poisoning later reloads", async () => {
+  let starts = 0;
+  let disposals = 0;
+  let failNextDisposal = true;
+  const reloader = new LarkRuntimeReloader(() => {
+    starts += 1;
+    return {
+      dispose: async () => {
+        disposals += 1;
+        if (failNextDisposal) {
+          failNextDisposal = false;
+          throw new Error("dispose failed");
+        }
+      },
+    };
+  });
+
+  await reloader.apply(normalizeConfig({ workspacePath: "/workspace/a" }));
+  await assert.rejects(
+    reloader.apply(normalizeConfig({ workspacePath: "/workspace/b" })),
+    /dispose failed/,
+  );
+  await reloader.apply(normalizeConfig({ workspacePath: "/workspace/c" }));
+  await reloader.close();
+
+  assert.equal(starts, 2);
+  assert.equal(disposals, 3);
 });

@@ -3,6 +3,15 @@ import type { ToolEventView } from "@deepseek-ai/dsh-host-apiproxy/api";
 import type { MuxEvent } from "./session-event-stream.js";
 
 type JsonObject = Record<string, unknown>;
+type ToolCallKind =
+  | "read"
+  | "edit"
+  | "delete"
+  | "move"
+  | "search"
+  | "execute"
+  | "fetch"
+  | "other";
 
 interface RpcSuccess<T> {
   ok: true;
@@ -46,6 +55,240 @@ export interface SessionEvent {
   data: unknown;
   /** Host-computed, provider-neutral presentation for tool calls/results. */
   view?: ToolEventView;
+}
+
+function object(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function text(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function number(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function locations(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((candidate) => {
+    const raw = object(candidate);
+    const path = text(raw?.path);
+    if (path === undefined) return [];
+    const line = number(raw?.line);
+    return [{ path, ...(line === undefined ? {} : { line }) }];
+  });
+}
+
+function diffs(value: unknown) {
+  if (!Array.isArray(value)) return undefined;
+  return value.flatMap((candidate) => {
+    const path = text(object(candidate)?.path);
+    return path === undefined ? [] : [{ path, oldText: null, newText: "" }];
+  });
+}
+
+/**
+ * Narrows a presentation view at the API boundary and drops content-bearing
+ * fields the chat progress surface never needs. A malformed or newer union arm
+ * degrades to no view instead of reaching render code as an unchecked cast.
+ */
+export function normalizeToolEventView(value: unknown): ToolEventView | undefined {
+  const raw = object(value);
+  const view = object(raw?.view);
+  if (raw === undefined || view === undefined) return undefined;
+
+  if (raw.for === "call") {
+    const title = text(view.title);
+    if (title === undefined) return undefined;
+    if (view.card === "generic") {
+      const kind =
+        typeof view.kind === "string" &&
+        ["read", "edit", "delete", "move", "search", "execute", "fetch", "other"].includes(
+          view.kind,
+        )
+          ? view.kind
+          : undefined;
+      const files = locations(view.locations);
+      return {
+        for: "call",
+        view: {
+          card: "generic",
+          title,
+          ...(kind === undefined ? {} : { kind: kind as ToolCallKind }),
+          ...(files.length === 0 ? {} : { locations: files }),
+        },
+      };
+    }
+    if (view.card === "terminal") {
+      const cwd = text(view.cwd);
+      return {
+        for: "call",
+        view: {
+          card: "terminal",
+          // TerminalCallView.title is the raw command, unlike every other
+          // call title. Replace it at the boundary so no downstream chat
+          // renderer can accidentally disclose command arguments.
+          title: "Terminal command",
+          ...(cwd === undefined ? {} : { cwd }),
+        },
+      };
+    }
+    if (view.card === "diff") {
+      const changes = diffs(view.diffs);
+      if (changes === undefined) return undefined;
+      const files = locations(view.locations);
+      return {
+        for: "call",
+        view: {
+          card: "diff",
+          title,
+          diffs: changes,
+          ...(files.length === 0 ? {} : { locations: files }),
+        },
+      };
+    }
+    return undefined;
+  }
+
+  if (raw.for !== "result") return undefined;
+  const title = text(view.title);
+  if (view.card === "generic") {
+    return {
+      for: "result",
+      view: { card: "generic", ...(title === undefined ? {} : { title }) },
+    };
+  }
+  if (view.card === "terminal") {
+    const exitCode = number(view.exitCode);
+    const signal = text(view.signal);
+    return {
+      for: "result",
+      view: {
+        card: "terminal",
+        ...(exitCode === undefined ? {} : { exitCode }),
+        ...(signal === undefined ? {} : { signal }),
+      },
+    };
+  }
+  if (view.card === "diff") {
+    const changes = diffs(view.diffs);
+    if (changes === undefined) return undefined;
+    return {
+      for: "result",
+      view: {
+        card: "diff",
+        ...(title === undefined ? {} : { title }),
+        diffs: changes,
+      },
+    };
+  }
+  if (view.card === "search") {
+    const total = number(view.total);
+    if (
+      total === undefined ||
+      typeof view.truncated !== "boolean" ||
+      (view.shape !== "matches" && view.shape !== "paths") ||
+      !Array.isArray(view.shape === "matches" ? view.files : view.paths)
+    ) {
+      return undefined;
+    }
+    return view.shape === "matches"
+      ? {
+          for: "result",
+          view: {
+            card: "search",
+            shape: "matches",
+            ...(title === undefined ? {} : { title }),
+            files: [],
+            truncated: view.truncated,
+            total,
+          },
+        }
+      : {
+          for: "result",
+          view: {
+            card: "search",
+            shape: "paths",
+            ...(title === undefined ? {} : { title }),
+            paths: [],
+            truncated: view.truncated,
+            total,
+          },
+        };
+  }
+  if (view.card === "read") {
+    const path = text(view.path);
+    const offset = number(view.offset);
+    const totalLines = number(view.totalLines);
+    if (
+      path === undefined ||
+      offset === undefined ||
+      totalLines === undefined ||
+      !Array.isArray(view.lines)
+    ) {
+      return undefined;
+    }
+    const lines = view.lines.flatMap((candidate) => {
+      const lineNumber = number(object(candidate)?.number);
+      return lineNumber === undefined ? [] : [{ number: lineNumber, text: "" }];
+    });
+    return {
+      for: "result",
+      view: {
+        card: "read",
+        ...(title === undefined ? {} : { title }),
+        path,
+        offset,
+        lines,
+        totalLines,
+      },
+    };
+  }
+  if (view.card === "web" && view.kind === "search") {
+    if (!Array.isArray(view.sources) || typeof view.truncated !== "boolean") {
+      return undefined;
+    }
+    const sources = view.sources.flatMap((candidate) => {
+      const url = text(object(candidate)?.url);
+      return url === undefined ? [] : [{ url }];
+    });
+    return {
+      for: "result",
+      view: {
+        card: "web",
+        kind: "search",
+        ...(title === undefined ? {} : { title }),
+        sources,
+        truncated: view.truncated,
+      },
+    };
+  }
+  if (view.card === "web" && view.kind === "fetch") {
+    const url = text(view.url);
+    const statusCode = number(view.statusCode);
+    if (
+      url === undefined ||
+      statusCode === undefined ||
+      typeof view.truncated !== "boolean"
+    ) {
+      return undefined;
+    }
+    return {
+      for: "result",
+      view: {
+        card: "web",
+        kind: "fetch",
+        ...(title === undefined ? {} : { title }),
+        url,
+        statusCode,
+        truncated: view.truncated,
+      },
+    };
+  }
+  return undefined;
 }
 
 interface HistoryEntry {

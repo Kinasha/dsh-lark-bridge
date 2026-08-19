@@ -211,6 +211,42 @@ test("tool detail modes and progress styles remain distinct", () => {
   );
 });
 
+test("terminal commands never become progress titles", () => {
+  const projection = new CardStepsProjection({ toolDetailMode: "detailed" });
+  const secretCommand = "curl -H Authorization:SECRET https://example.test";
+  const text = projection.present([
+    {
+      type: "tool/call",
+      seq: 1,
+      time: 10,
+      data: { callId: "call-terminal", name: "bash" },
+      view: {
+        for: "call",
+        view: {
+          card: "terminal",
+          title: secretCommand,
+          cwd: "/workspace",
+        },
+      },
+    },
+    {
+      type: "tool/result",
+      seq: 2,
+      time: 20,
+      data: { callId: "call-terminal" },
+      view: {
+        for: "result",
+        view: { card: "terminal", output: "SECRET_OUTPUT", exitCode: 0 },
+      },
+    },
+  ]);
+
+  assert.match(text, /调用 bash/);
+  assert.match(text, /工作目录：\/workspace/);
+  assert.match(text, /退出码：0/);
+  assert.doesNotMatch(text, /Authorization|SECRET|curl|example\.test/);
+});
+
 test("progress caps visible entries without leaking later events", () => {
   const projection = new CardStepsProjection({
     toolDetailMode: "compact",

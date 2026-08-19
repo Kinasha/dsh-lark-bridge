@@ -57,33 +57,41 @@ export class LarkRuntimeReloader {
     options: { force?: boolean } = {},
   ): Promise<void> {
     if (this.closed) return Promise.reject(new Error("Lark runtime reloader is closed"));
-    const previous = this.current;
-    this.current = next;
-    const restart =
-      options.force === true ||
-      previous === undefined ||
-      requiresRuntimeReload(previous, next);
-    if (!restart) return this.queue;
-
-    this.queue = this.queue.then(async () => {
-      const active = this.active;
-      this.active = undefined;
-      await active?.dispose();
+    const operation = this.queue.then(async () => {
       if (this.closed) return;
+      const previous = this.current;
+      const restart =
+        options.force === true ||
+        previous === undefined ||
+        this.active === undefined ||
+        requiresRuntimeReload(previous, next);
+      if (!restart) {
+        this.current = next;
+        return;
+      }
+      const active = this.active;
+      await active?.dispose();
+      if (this.active === active) this.active = undefined;
+      if (this.closed) return;
+      // Keep the previous snapshot visible until the previous runtime has
+      // finished disposing. This prevents its dynamic reply config from
+      // observing a new structural policy during the hand-off window.
+      this.current = next;
       this.active = this.start(() => this.snapshot());
     });
-    return this.queue;
+    this.queue = operation.catch(() => undefined);
+    return operation;
   }
 
   close(): Promise<void> {
-    if (this.closed) return this.queue;
     this.closed = true;
-    this.queue = this.queue.then(async () => {
+    const operation = this.queue.then(async () => {
       const active = this.active;
-      this.active = undefined;
       await active?.dispose();
+      if (this.active === active) this.active = undefined;
     });
-    return this.queue;
+    this.queue = operation.catch(() => undefined);
+    return operation;
   }
 
   private snapshot(): NormalizedLarkConfig {

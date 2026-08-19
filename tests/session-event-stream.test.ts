@@ -184,6 +184,62 @@ test("a mux session event retains the host-computed tool presentation view", () 
   );
 });
 
+test("malformed ToolEventView fields are normalized before rendering", () => {
+  const normalized = narrowMuxFrame("r-view", {
+    type: "session/event",
+    sessionId: "s1",
+    event: {
+      type: "tool/call",
+      seq: 4,
+      time: 10,
+      data: { callId: "call-1", name: "read" },
+    },
+    view: {
+      for: "call",
+      view: {
+        card: "generic",
+        title: "Read safely",
+        locations: "not-an-array",
+        rawInput: "SECRET_INPUT",
+      },
+    },
+  });
+  assert.deepEqual(normalized, {
+    type: "session/event",
+    sessionId: "s1",
+    event: {
+      type: "tool/call",
+      seq: 4,
+      time: 10,
+      data: { callId: "call-1", name: "read" },
+      view: {
+        for: "call",
+        view: { card: "generic", title: "Read safely" },
+      },
+    },
+  });
+
+  const invalidResult = narrowMuxFrame("r-view", {
+    type: "session/event",
+    sessionId: "s1",
+    event: { type: "tool/result", seq: 5, time: 11, data: {} },
+    view: {
+      for: "result",
+      view: {
+        card: "read",
+        path: "src/a.ts",
+        offset: 1,
+        lines: "not-an-array",
+        totalLines: 1,
+      },
+    },
+  });
+  assert.equal(invalidResult?.type, "session/event");
+  if (invalidResult?.type === "session/event") {
+    assert.equal(invalidResult.event.view, undefined);
+  }
+});
+
 test("demultiplexes frames to the subscriber for that session", async () => {
   const wire: Wire = {
     frames: [[frame("s1", event(1, "turn/start")), frame("s2", event(1, "turn/start"))]],

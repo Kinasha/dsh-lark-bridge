@@ -14,6 +14,7 @@ import {
   type WorkspaceView,
   completedTurnAfter,
   historySince,
+  normalizeToolEventView,
   waitForCompletedTurn,
 } from "./dsh-client.js";
 import {
@@ -114,10 +115,13 @@ export class ApiProxyDshClient implements DshBridgeClient {
         }),
       ),
     );
-    return value.events.map((entry) => ({
-      ...(entry.event as SessionEvent),
-      ...(entry.view === undefined ? {} : { view: entry.view }),
-    }));
+    return value.events.map((entry) => {
+      const view = normalizeToolEventView(entry.view);
+      return {
+        ...(entry.event as SessionEvent),
+        ...(view === undefined ? {} : { view }),
+      };
+    });
   }
 
   async lastSeq(sessionId: string): Promise<number> {

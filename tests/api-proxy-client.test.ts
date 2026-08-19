@@ -86,7 +86,7 @@ test("API proxy adapter unwraps gateway failures", async () => {
   );
 });
 
-test("history retains the host-computed tool presentation view", async () => {
+test("history normalizes the host-computed tool presentation view", async () => {
   const view = {
     for: "result" as const,
     view: { card: "terminal" as const, title: "Build", exitCode: 0 },
@@ -116,7 +116,10 @@ test("history retains the host-computed tool presentation view", async () => {
       seq: 7,
       time: 20,
       data: { message: { content: [] } },
-      view,
+      view: {
+        for: "result",
+        view: { card: "terminal", exitCode: 0 },
+      },
     },
   ]);
 });
