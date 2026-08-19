@@ -1,0 +1,35 @@
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      dev-dependencies:
+        dependency-type: development
+    ignore:
+      # The @deepseek-ai/dsh* packages are one release train: the README, this
+      # bridge's settings and the host seams are all written against a single
+      # rc, and scripts/check-repo.mjs fails when they stop agreeing. Upgrading
+      # them is a deliberate change, not a dependency bump.
+      - dependency-name: "@deepseek-ai/dsh"
+      - dependency-name: "@deepseek-ai/dsh-*"
+      # The DSH web client injects its own React; a major bump here would build
+      # against a runtime the host does not provide.
+      - dependency-name: "react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+      include: scope
