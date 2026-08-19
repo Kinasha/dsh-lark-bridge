@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import path from "node:path";
 import { config as loadDotenv } from "dotenv";
-import { assertLarkBotReady, resolveLarkCredentials } from "./lark.js";
+import { assertLarkBotReady, resolveLarkCredentials } from "./lark/transport.js";
 
 loadDotenv({ path: path.resolve(".env"), override: false, quiet: true });
 

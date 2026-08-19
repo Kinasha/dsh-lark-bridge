@@ -2,14 +2,14 @@ import type { Context } from "@deepseek-ai/cordis";
 import type {} from "@deepseek-ai/dsh-host-apiproxy";
 import type {} from "@deepseek-ai/dsh-host-webserver";
 import type { SettingsNamespace } from "@deepseek-ai/dsh-settings";
-import { ApiProxyDshClient } from "./api-proxy-client.js";
-import { runBridge } from "./bridge.js";
-import { ConsumerSupervisor } from "./consumer-supervisor.js";
+import { ApiProxyDshClient } from "./dsh/api-proxy-client.js";
+import { runBridge } from "./bridge/bridge.js";
+import { ConsumerSupervisor } from "./bridge/consumer-supervisor.js";
 import {
   EventAdmissionStore,
   JsonFileAdmissionAdapter,
-} from "./event-admission.js";
-import { createLarkSdkApiClient, LarkSdkTransport } from "./lark.js";
+} from "./bridge/event-admission.js";
+import { createLarkSdkApiClient, LarkSdkTransport } from "./lark/transport.js";
 import {
   describeLarkCredentials,
   LARK_APP_ID_REF,
@@ -19,13 +19,13 @@ import {
   unsetLarkCredential,
   type CredentialProviderPort,
   type LarkCredentialRef,
-} from "./lark-credentials.js";
-import { JsonFileLarkUserAuthStore, LarkUserAuth } from "./lark-user-auth.js";
-import { registerLarkUserAuthWeb } from "./lark-user-auth-web.js";
+} from "./settings/credentials.js";
+import { JsonFileLarkUserAuthStore, LarkUserAuth } from "./lark/user-auth.js";
+import { registerLarkUserAuthWeb } from "./lark/user-auth-web.js";
 import {
   registerLarkSettingsApi,
   type LarkSettingsDescriptor,
-} from "./lark-settings-api.js";
+} from "./settings/api.js";
 import type { SemanticLogger } from "./logger.js";
 import {
   Config,
@@ -33,27 +33,27 @@ import {
   replyModePolicy,
   runtimeFeaturePolicy,
   type NormalizedLarkConfig,
-} from "./lark-config.js";
+} from "./settings/schema.js";
 import {
   MemoryLarkHtmlReportStore,
   registerLarkHtmlReportWeb,
-} from "./lark-html-host.js";
-import { LarkCardKitGateway } from "./lark-cardkit.js";
-import { LarkReplyChannel } from "./lark-reply.js";
+} from "./html/host.js";
+import { LarkCardKitGateway } from "./card/cardkit.js";
+import { LarkReplyChannel } from "./card/reply.js";
 import {
   CardActionRegistry,
   CardActionRouter,
   type CardActionEffectsPort,
-} from "./lark-card-actions.js";
-import { LarkQuestionController } from "./lark-questions.js";
+} from "./card/actions.js";
+import { LarkQuestionController } from "./card/questions.js";
 import {
   SessionEventStream,
   type SessionEventSourcePort,
-} from "./session-event-stream.js";
+} from "./dsh/session-event-stream.js";
 import {
   LarkRuntimeReloader,
   requiresRuntimeReload,
-} from "./lark-config-reload.js";
+} from "./settings/reload.js";
 
 export const name = "@open-aiden/dsh-lark-bridge";
 /**
@@ -360,6 +360,7 @@ async function installRuntime(
       return {
         enableCardKit: activePolicy.enableCardKit,
         enableCot: activePolicy.enableCot,
+        progressSurface: active.progressSurface,
         alwaysPostFinal: active.alwaysPostFinal,
         printFrequencyMs: active.streamPrintFrequencyMs,
         printStep: active.streamPrintStep,

@@ -4,7 +4,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { isMap, isScalar, parseDocument, type Scalar } from "yaml";
-import { CONFIG_FIELD_NAMES, Config } from "../src/lark-config.js";
+import { CONFIG_FIELD_NAMES, Config } from "../src/settings/schema.js";
+import { inject, name } from "../src/plugin.js";
 
 const PATCH_PATH = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -102,9 +103,30 @@ test("evaluating each expression yields a value the schema accepts", () => {
   assert.equal(resolved.allowSlashCommands, false);
   assert.equal(resolved.maxConcurrentTopics, 4);
   assert.equal(resolved.turnTimeoutMs, 0);
+  assert.equal(resolved.progressSurface, "cot");
   assert.equal(resolved.toolDetailMode, "standard");
   assert.equal(resolved.progressStyle, "timeline");
   assert.equal(resolved.thinkingIcon, "brain");
   assert.equal(resolved.maxProgressItems, 100);
   assert.equal(resolved.collapseProgressOnFinish, true);
+});
+
+test("the patch requests exactly the seams the plugin requires", () => {
+  // DSH composes the plugin from this list, not from `inject` in the module: a
+  // seam the plugin requires but the patch omits is undefined at apply() time,
+  // and an optional seam listed here becomes required, so a profile without it
+  // refuses to load the whole bundle.
+  const document = parseDocument(readFileSync(PATCH_PATH, "utf8"));
+  const entry = document.getIn(["0", "insert", "0"], true);
+  assert.ok(isMap(entry), "the patch inserts one plugin entry");
+  assert.equal(entry.get("name"), name, "the entry names this package");
+
+  const requested = (entry.get("inject") as { toJSON(): unknown }).toJSON();
+  assert.deepEqual(requested, inject.required);
+  for (const optional of inject.optional) {
+    assert.ok(
+      !(requested as string[]).includes(optional),
+      `${optional} is optional; requesting it makes a profile without it fail to load`,
+    );
+  }
 });

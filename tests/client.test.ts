@@ -12,7 +12,7 @@ import {
   validInteger,
   type SchemaNode,
 } from "../src/client.js";
-import { Config } from "../src/lark-config.js";
+import { Config } from "../src/settings/schema.js";
 
 test("the package manifest is exported for DSH client discovery", () => {
   const require = createRequire(import.meta.url);

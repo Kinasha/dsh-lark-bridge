@@ -89,6 +89,16 @@ test("progress presentation settings expose validated modes and safe defaults", 
   assert.throws(() => Config({ maxProgressItems: 0 } as never));
 });
 
+test("the thinking chain defaults to the surface Web-originated turns use", () => {
+  assert.equal(Config({}).progressSurface, "cot");
+  assert.equal(normalizeConfig({}).progressSurface, "cot");
+  assert.equal(
+    normalizeConfig({ progressSurface: "card" }).progressSurface,
+    "card",
+  );
+  assert.throws(() => Config({ progressSurface: "panel" } as never));
+});
+
 test("event-stream dependent features honor their public switches", () => {
   assert.deepEqual(runtimeFeaturePolicy(normalizeConfig({})), {
     useEventStream: true,
