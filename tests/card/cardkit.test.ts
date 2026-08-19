@@ -10,8 +10,8 @@ import {
   LarkCardKitGateway,
   type CardKitApiClientPort,
   type CardKitResponse,
-} from "../src/lark-cardkit.js";
-import { markdownElement, type Card2 } from "../src/lark-card.js";
+} from "../../src/card/cardkit.js";
+import { markdownElement, type Card2 } from "../../src/card/schema.js";
 import type { Client } from "@larksuiteoapi/node-sdk";
 
 // Regression lock, type level only: the real SDK client must stay structurally

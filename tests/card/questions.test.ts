@@ -4,14 +4,14 @@ import {
   CardActionRegistry,
   CardActionRouter,
   type CardActionEffectsPort,
-} from "../src/lark-card-actions.js";
-import type { CardElement } from "../src/lark-card.js";
-import { LarkQuestionController } from "../src/lark-questions.js";
+} from "../../src/card/actions.js";
+import type { CardElement } from "../../src/card/schema.js";
+import { LarkQuestionController } from "../../src/card/questions.js";
 import {
   SessionEventStream,
   type ClientResponseMessage,
   type SessionEventSourcePort,
-} from "../src/session-event-stream.js";
+} from "../../src/dsh/session-event-stream.js";
 
 const SESSION = "lark-session";
 const OWNER = "ou_owner";

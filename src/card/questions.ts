@@ -5,19 +5,19 @@ import {
   markdownElement,
   sanitizeCardMarkdown,
   type CardElement,
-} from "./lark-card.js";
+} from "./schema.js";
 import {
   encodeCardActionValue,
   type CardActionBinding,
   type CardActionRegistry,
-} from "./lark-card-actions.js";
+} from "./actions.js";
 import type {
   MuxEvent,
   QuestionItem,
   SessionEventStream,
-} from "./session-event-stream.js";
-import type { ReplyButtonProvider } from "./lark-reply.js";
-import { silentLogger, type SemanticLogger } from "./logger.js";
+} from "../dsh/session-event-stream.js";
+import type { ReplyButtonProvider } from "./reply.js";
+import { silentLogger, type SemanticLogger } from "../logger.js";
 
 type QuestionRequest = Extract<MuxEvent, { type: "question/requested" }>;
 

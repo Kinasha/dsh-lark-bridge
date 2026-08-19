@@ -18,7 +18,7 @@ import {
   serializeCard,
   type Card2,
   type CardElement,
-} from "../src/lark-card.js";
+} from "../../src/card/schema.js";
 
 function card(elements: CardElement[]): Card2 {
   return {

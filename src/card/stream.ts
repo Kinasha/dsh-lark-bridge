@@ -26,16 +26,19 @@ import {
   type Card2,
   type CardBehavior,
   type CardElement,
-} from "./lark-card.js";
-import type { CardKitCardHandle } from "./lark-cardkit.js";
-import { toolPresentation } from "./cot.js";
-import type { SessionEvent } from "./dsh-client.js";
+} from "./schema.js";
+import type { CardKitCardHandle } from "./cardkit.js";
+import {
+  TurnProgressProjection,
+  type ProgressStep,
+} from "../progress/turn-progress.js";
+import type { SessionEvent } from "../dsh/client.js";
 import type {
   ProgressStyle,
   ThinkingIcon,
   ToolDetailMode,
-} from "./lark-config.js";
-import { silentLogger, type SemanticLogger } from "./logger.js";
+} from "../settings/schema.js";
+import { silentLogger, type SemanticLogger } from "../logger.js";
 
 export const BODY_ELEMENT_ID = "dsh_body";
 export const STEPS_PANEL_ELEMENT_ID = "dsh_steps";
@@ -427,11 +430,20 @@ export class CardReplySession {
   }
 }
 
-function statusText(outcome: CardTurnOutcome): string {
+export function statusText(outcome: CardTurnOutcome): string {
   if (outcome === "interrupted") return "已停止。";
   if (outcome === "timeout") return "DeepSeek Harness 执行超时。";
   if (outcome === "error") return "DeepSeek Harness 执行失败。";
   return EMPTY_BODY_TEXT;
+}
+
+/**
+ * The body a reply carries when the turn produced no prose. A turn that ran
+ * tools and said nothing is still a delivered turn, and Feishu rejects an empty
+ * `post` body — the rejection would turn a finished turn into a failed one.
+ */
+export function finalReplyText(text: string, outcome: CardTurnOutcome): string {
+  return text.trim() === "" ? statusText(outcome) : text;
 }
 
 function statusSummary(outcome: CardTurnOutcome): string {
@@ -448,109 +460,6 @@ export interface CardProgressOptions {
   maxProgressItems?: number;
 }
 
-interface OpenCardTool {
-  name: string;
-  title: string;
-  startedAt: number;
-}
-
-function record(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function oneLine(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const normalized = value.replace(/\s+/g, " ").trim();
-  return normalized ? normalized.slice(0, 240) : undefined;
-}
-
-function toolResultCallId(data: Record<string, unknown>): string | undefined {
-  const direct = oneLine(data.callId);
-  if (direct !== undefined) return direct;
-  const message = record(data.message);
-  const content = Array.isArray(message?.content) ? message.content : [];
-  for (const candidate of content) {
-    const block = record(candidate);
-    if (block?.type !== "tool-result") continue;
-    const callId = oneLine(block.toolCallId);
-    if (callId !== undefined) return callId;
-  }
-  return undefined;
-}
-
-function toolResultFailed(data: Record<string, unknown>): boolean {
-  if (record(data.error) !== undefined) return true;
-  const message = record(data.message);
-  const content = Array.isArray(message?.content) ? message.content : [];
-  return content.some((candidate) => {
-    const block = record(candidate);
-    return block?.type === "tool-result" && block.isError === true;
-  });
-}
-
-function durationText(startedAt: number, finishedAt: number): string | undefined {
-  const elapsed = finishedAt - startedAt;
-  if (!Number.isFinite(elapsed) || elapsed < 0) return undefined;
-  if (elapsed < 1_000) return `${Math.round(elapsed)} ms`;
-  if (elapsed < 60_000) return `${(elapsed / 1_000).toFixed(elapsed < 10_000 ? 1 : 0)} s`;
-  return `${(elapsed / 60_000).toFixed(1)} min`;
-}
-
-function locationText(locations: readonly { path: string; line?: number }[]): string[] {
-  const unique = [
-    ...new Set(
-      locations.map(({ path, line }) => `${path}${line === undefined ? "" : `:${line}`}`),
-    ),
-  ];
-  const shown = unique.slice(0, 3);
-  if (unique.length > shown.length) shown.push(`另有 ${unique.length - shown.length} 个位置`);
-  return shown;
-}
-
-function callDetails(event: SessionEvent): string[] {
-  if (event.view?.for !== "call") return [];
-  const view = event.view.view;
-  if (view.card === "generic") {
-    const locations = view.locations ?? [];
-    return locationText(locations).map((location) => `路径：${location}`);
-  }
-  if (view.card === "terminal") {
-    return view.cwd === undefined ? [] : [`工作目录：${view.cwd}`];
-  }
-  const paths = view.locations?.map(({ path, line }) => ({ path, line })) ??
-    view.diffs.map(({ path }) => ({ path }));
-  return locationText(paths).map((location) => `文件：${location}`);
-}
-
-function resultDetails(event: SessionEvent): string[] {
-  if (event.view?.for !== "result") return [];
-  const view = event.view.view;
-  if (view.card === "terminal") {
-    if (view.exitCode !== undefined) return [`退出码：${view.exitCode}`];
-    return view.signal === undefined ? [] : [`终止信号：${view.signal}`];
-  }
-  if (view.card === "read") {
-    return [`已读取 ${view.lines.length}/${view.totalLines} 行`];
-  }
-  if (view.card === "diff") {
-    return locationText(view.diffs.map(({ path }) => ({ path }))).map(
-      (location) => `已修改：${location}`,
-    );
-  }
-  if (view.card === "search") {
-    return [`找到 ${view.total} 项${view.truncated ? "（已截断）" : ""}`];
-  }
-  if (view.card === "web") {
-    if (view.kind === "search") {
-      return [`来源 ${view.sources.length} 项${view.truncated ? "（已截断）" : ""}`];
-    }
-    return [`HTTP ${view.statusCode}${view.truncated ? " · 内容已截断" : ""}`];
-  }
-  return [];
-}
-
 function thinkingGlyph(icon: ThinkingIcon): string {
   if (icon === "sparkles") return "✨";
   if (icon === "robot") return "🤖";
@@ -564,11 +473,9 @@ function thinkingGlyph(icon: ThinkingIcon): string {
  * raw arguments, result content, and diff bodies are deliberately ignored.
  */
 export class CardStepsProjection {
-  private readonly seenSeqs = new Set<number>();
-  private readonly openTools = new Map<string, OpenCardTool>();
+  private readonly progress: TurnProgressProjection;
   private readonly lines: string[] = [];
   private readonly options: Required<CardProgressOptions>;
-  private steps = 0;
   private items = 0;
   private truncated = false;
 
@@ -579,71 +486,45 @@ export class CardStepsProjection {
       thinkingIcon: options.thinkingIcon ?? "brain",
       maxProgressItems: options.maxProgressItems ?? 100,
     };
+    this.progress = new TurnProgressProjection({
+      toolDetailMode: this.options.toolDetailMode,
+    });
   }
 
   /** Absorbs a batch of events and returns the full panel text so far. */
   present(events: readonly SessionEvent[]): string {
-    for (const event of [...events].sort((left, right) => left.seq - right.seq)) {
-      if (this.seenSeqs.has(event.seq)) continue;
-      this.seenSeqs.add(event.seq);
-      const data =
-        event.data && typeof event.data === "object" && !Array.isArray(event.data)
-          ? (event.data as Record<string, unknown>)
-          : undefined;
-      if (event.type === "step/start") {
-        this.steps += 1;
-        this.append(
-          "reasoning",
-          thinkingGlyph(this.options.thinkingIcon),
-          this.steps === 1 ? "正在分析任务…" : "正在根据执行结果继续分析…",
-        );
-        continue;
-      }
-      if (event.type === "tool/call" && data !== undefined) {
-        const callId = typeof data.callId === "string" ? data.callId.trim() : "";
-        const name = typeof data.name === "string" ? data.name.trim() : "";
-        if (callId && name && !this.openTools.has(callId)) {
-          const viewTitle =
-            event.view?.for === "call" && event.view.view.card !== "terminal"
-              ? oneLine(event.view.view.title)
-              : undefined;
-          const title =
-            this.options.toolDetailMode === "compact"
-              ? toolPresentation(name).title
-              : (viewTitle ?? toolPresentation(name).title);
-          this.openTools.set(callId, { name, title, startedAt: event.time });
-          if (this.options.toolDetailMode !== "hidden") {
-            this.append(
-              "tool",
-              "🔧",
-              title,
-              this.options.toolDetailMode === "detailed" ? callDetails(event) : [],
-            );
-          }
-        }
-        continue;
-      }
-      if (event.type === "tool/result" && data !== undefined) {
-        const callId = toolResultCallId(data);
-        const tool = callId === undefined ? undefined : this.openTools.get(callId);
-        if (callId !== undefined) this.openTools.delete(callId);
-        if (
-          tool !== undefined &&
-          (this.options.toolDetailMode === "standard" ||
-            this.options.toolDetailMode === "detailed")
-        ) {
-          const failed = toolResultFailed(data);
-          const duration = durationText(tool.startedAt, event.time);
-          this.append(
-            "result",
-            failed ? "❌" : "✅",
-            `${tool.title}${duration === undefined ? "" : ` · ${duration}`}`,
-            this.options.toolDetailMode === "detailed" ? resultDetails(event) : [],
-          );
-        }
-      }
-    }
+    for (const step of this.progress.present(events)) this.render(step);
     return this.text();
+  }
+
+  private render(step: ProgressStep): void {
+    if (step.kind === "reasoning") {
+      this.append(
+        "reasoning",
+        thinkingGlyph(this.options.thinkingIcon),
+        step.text,
+      );
+      return;
+    }
+    // `hidden` drops both halves of a tool, never one: the native COT surface
+    // reads the same steps and an unmatched half leaves a tool spinning.
+    if (this.options.toolDetailMode === "hidden") return;
+    if (step.kind === "tool-start") {
+      this.append("tool", "🔧", step.title, step.details);
+      return;
+    }
+    if (
+      this.options.toolDetailMode !== "standard" &&
+      this.options.toolDetailMode !== "detailed"
+    ) {
+      return;
+    }
+    this.append(
+      "result",
+      step.failed ? "❌" : "✅",
+      `${step.title}${step.duration === undefined ? "" : ` · ${step.duration}`}`,
+      step.details,
+    );
   }
 
   text(): string {

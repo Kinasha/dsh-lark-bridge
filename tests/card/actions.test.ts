@@ -9,7 +9,7 @@ import {
   type CardActionBinding,
   type CardActionEffectsPort,
   type CardActionValue,
-} from "../src/lark-card-actions.js";
+} from "../../src/card/actions.js";
 
 const OWNER = "ou_owner";
 const SESSION = "lark-abc";

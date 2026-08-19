@@ -15,7 +15,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { silentLogger, type SemanticLogger } from "./logger.js";
+import { silentLogger, type SemanticLogger } from "../logger.js";
 
 /** Leaves headroom inside Feishu's 3 s callback deadline. */
 export const CARD_ACTION_BUDGET_MS = 2_500;

@@ -21,8 +21,8 @@ import {
   type Card2Config,
   type Card2Link,
   type CardElement,
-} from "./lark-card.js";
-import { silentLogger, type SemanticLogger } from "./logger.js";
+} from "./schema.js";
+import { silentLogger, type SemanticLogger } from "../logger.js";
 
 /** Feishu allows 10 operations per second on one card entity; 10% margin. */
 export const CARD_OP_MIN_INTERVAL_MS = 110;

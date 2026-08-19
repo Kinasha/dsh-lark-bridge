@@ -12,9 +12,9 @@ import {
   STEPS_ELEMENT_ID,
   STEPS_PANEL_ELEMENT_ID,
   STOP_BUTTON_ELEMENT_ID,
-} from "../src/lark-card-stream.js";
-import type { CardElement } from "../src/lark-card.js";
-import type { CardKitAction, CardKitCardHandle } from "../src/lark-cardkit.js";
+} from "../../src/card/stream.js";
+import type { CardElement } from "../../src/card/schema.js";
+import type { CardKitAction, CardKitCardHandle } from "../../src/card/cardkit.js";
 
 type Recorded =
   | { op: "content"; elementId: string; content: string }

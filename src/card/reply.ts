@@ -1,15 +1,22 @@
 /**
  * Reply channel: picks how one DSH turn reaches the Feishu topic, and degrades.
  *
- * Three tiers, in order:
+ * Three tiers:
  *
+ *   cot     — the ByteDance-internal `message_cot` message carries the native
+ *             thinking chain and a separate `post` reply carries the final
+ *             answer. This is the default progress surface, and the same one a
+ *             turn typed in the Web UI is mirrored into, so a topic shows one
+ *             kind of thinking chain no matter where its turns came from. It
+ *             cannot create a topic, so a topic's first turn skips it.
  *   cardkit — a CardKit 2.0 card entity carries both the progress panel and the
  *             final answer, streamed with Feishu's native typewriter effect.
- *             This is the public-cloud path.
- *   cot     — the ByteDance-internal `message_cot` message carries progress and
- *             a separate `post` reply carries the final answer. Reachable only
- *             on ByteDance tenants and never used to create a new topic.
+ *             This is the public-cloud path, and the fallback whenever COT is
+ *             ineligible or unreachable.
  *   post    — a single `post` reply with the final answer. Always available.
+ *
+ * `progressSurface` picks which of the first two is tried first; the other
+ * remains the fallback either way.
  *
  * The invariant every path upholds: **one turn produces exactly one primary
  * user-visible final answer.** `finalize()` reports which tier delivered it.
@@ -19,29 +26,31 @@ import {
   CardReplySession,
   CardStepsProjection,
   buildStreamingCard,
+  finalReplyText,
   type CardProgressOptions,
   type CardStreamOptions,
   type CardTurnOutcome,
   type TerminalCardButton,
-} from "./lark-card-stream.js";
+} from "./stream.js";
 import {
   cardEntityMessageContent,
   cardSendUuid,
   isFatalCardError,
   CardKitError,
   type LarkCardKitGateway,
-} from "./lark-cardkit.js";
-import { DshCotProjection, type CotMessage } from "./cot.js";
-import type { CardBehavior } from "./lark-card.js";
-import type { SessionEvent } from "./dsh-client.js";
-import type { CardElement } from "./lark-card.js";
-import { silentLogger, type SemanticLogger } from "./logger.js";
-import type { MuxEvent } from "./session-event-stream.js";
+} from "./cardkit.js";
+import { DshCotProjection, type CotMessage } from "../progress/cot.js";
+import type { CardBehavior, CardElement } from "./schema.js";
+import type { SessionEvent } from "../dsh/client.js";
+import { silentLogger, type SemanticLogger } from "../logger.js";
+import type { MuxEvent } from "../dsh/session-event-stream.js";
 import type {
   ProgressStyle,
+  ProgressSurface,
   ThinkingIcon,
   ToolDetailMode,
-} from "./lark-config.js";
+} from "../settings/schema.js";
+import type { TurnProgressOptions } from "../progress/turn-progress.js";
 
 export type ReplyTier = "cardkit" | "cot" | "post";
 
@@ -60,7 +69,7 @@ export interface ReplyDelivery {
   alsoPosted?: boolean;
 }
 
-export type { TerminalCardButton as TerminalButton } from "./lark-card-stream.js";
+export type { TerminalCardButton as TerminalButton } from "./stream.js";
 
 /**
  * Supplies the card's interactive affordances. Kept as a port so the reply
@@ -118,6 +127,8 @@ export interface ReplyTransportPort {
 export interface ReplyChannelConfig {
   enableCardKit?: boolean;
   enableCot?: boolean;
+  /** Which progress surface a turn prefers; the other stays the fallback. */
+  progressSurface?: ProgressSurface;
   alwaysPostFinal?: boolean;
   printFrequencyMs?: number;
   printStep?: number;
@@ -201,6 +212,9 @@ function isCardFatal(error: unknown): boolean {
   return error instanceof CardKitError && isFatalCardError(error.code);
 }
 
+/** How many consecutive open failures retire a tier for the rest of the run. */
+const TIER_FAILURES_BEFORE_UNAVAILABLE = 3;
+
 /** Always-available last resort. */
 class PostReplySession implements ReplySession {
   readonly tier: ReplyTier = "post";
@@ -229,7 +243,7 @@ class PostReplySession implements ReplySession {
         sourceMessageId: input.replyKey ?? this.route.sourceMessageId,
         topicRootMessageId: this.route.topicRootMessageId,
       },
-      input.text,
+      finalReplyText(input.text, input.outcome),
     );
     return {
       delivered: true,
@@ -408,6 +422,14 @@ export class LarkReplyChannel {
   private cardKitAvailable: boolean;
   private questionCardAvailable: boolean;
   private cotAvailable: boolean;
+  /**
+   * Consecutive `open()` failures per tier. One failure is not a verdict — a
+   * blip used to retire a tier for the life of the process — but a run of them
+   * is a deployment fact (a missing scope, a host that does not resolve) worth
+   * caching so every later turn stops paying for it.
+   */
+  private cardKitFailures = 0;
+  private cotFailures = 0;
   private readonly logger: SemanticLogger;
 
   constructor(private readonly options: ReplyChannelOptions) {
@@ -425,9 +447,19 @@ export class LarkReplyChannel {
   /** Which tier the next `open()` would try first; exposed for diagnostics. */
   get preferredTier(): ReplyTier {
     const config = this.currentConfig();
-    if (config.enableCardKit && this.cardKitAvailable) return "cardkit";
-    if (config.enableCot && this.cotAvailable) return "cot";
-    return "post";
+    const cot = config.enableCot && this.cotAvailable;
+    const cardKit = config.enableCardKit && this.cardKitAvailable;
+    if (config.progressSurface === "cot") {
+      if (cot) return "cot";
+      return cardKit ? "cardkit" : "post";
+    }
+    if (cardKit) return "cardkit";
+    return cot ? "cot" : "post";
+  }
+
+  /** Progress presentation the COT and card surfaces must agree on. */
+  progressOptions(): TurnProgressOptions {
+    return { toolDetailMode: this.currentConfig().toolDetailMode };
   }
 
   async open(input: OpenReplyInput): Promise<ReplySession> {
@@ -439,14 +471,18 @@ export class LarkReplyChannel {
       input.route,
       questionPresenter,
     );
-    return (
-      (await this.openCardKit(input, fallback, config)) ??
-      // message_cot cannot carry a top-level reply into the topic it creates.
-      (input.route.replyInThread
+    // message_cot cannot carry a top-level reply into the topic it creates, so
+    // a topic's first turn is never eligible for it.
+    const cot = async (): Promise<ReplySession | undefined> =>
+      input.route.replyInThread
         ? undefined
-        : await this.openCot(input, questionPresenter, config)) ??
-      fallback
-    );
+        : this.openCot(input, questionPresenter, config);
+    const card = (): Promise<ReplySession | undefined> =>
+      this.openCardKit(input, fallback, config);
+    if (config.progressSurface === "cot") {
+      return (await cot()) ?? (await card()) ?? fallback;
+    }
+    return (await card()) ?? (await cot()) ?? fallback;
   }
 
   private async presentQuestionCard(
@@ -591,6 +627,7 @@ export class LarkReplyChannel {
           ownerOpenId: input.ownerOpenId,
         });
       }
+      this.cardKitFailures = 0;
       this.logger.info("card_reply_opened", {
         sessionId: input.sessionId,
         cardId: handle.cardId,
@@ -610,12 +647,18 @@ export class LarkReplyChannel {
         logger: this.logger,
       });
     } catch (error) {
-      // One probe, not one per turn: a missing `cardkit:card:write` scope or an
-      // unreachable CardKit is a deployment fact, not a transient failure.
-      this.cardKitAvailable = false;
-      this.questionCardAvailable = false;
+      // A missing `cardkit:card:write` scope or an unreachable CardKit is a
+      // deployment fact worth caching, but a single failure is not evidence of
+      // one: retire the tier only once failures repeat.
+      this.cardKitFailures += 1;
+      if (this.cardKitFailures >= TIER_FAILURES_BEFORE_UNAVAILABLE) {
+        this.cardKitAvailable = false;
+        this.questionCardAvailable = false;
+      }
       this.logger.warn("card_reply_unavailable", {
         sessionId: input.sessionId,
+        failures: this.cardKitFailures,
+        retired: !this.cardKitAvailable,
         errorName: error instanceof Error ? error.name : typeof error,
         ...(error instanceof CardKitError ? { code: error.code } : {}),
       });
@@ -632,43 +675,63 @@ export class LarkReplyChannel {
     if (!config.enableCot || !this.cotAvailable || transport.createCot === undefined) {
       return undefined;
     }
+    const sourceMessageId = input.route.replyInThread
+      ? input.route.topicRootMessageId
+      : input.route.sourceMessageId;
+    let cot: CotMessage;
     try {
-      const cot = await transport.createCot({
+      // COT lives on a ByteDance-internal host; on any other tenant creating
+      // one fails with a DNS timeout, so a run of failures retires the tier.
+      cot = await transport.createCot({
         chatId: input.route.chatId,
-        sourceMessageId: input.route.replyInThread
-          ? input.route.topicRootMessageId
-          : input.route.sourceMessageId,
+        sourceMessageId,
       });
-      const projection = new DshCotProjection(
-        cot.writer,
-        input.runId,
-        input.route.replyInThread
-          ? input.route.topicRootMessageId
-          : input.route.sourceMessageId,
-      );
-      await projection.start(input.query);
-      this.logger.info("cot_created", {
-        sessionId: input.sessionId,
-        cotId: cot.cotId,
-        messageId: cot.messageId,
-      });
-      return new CotReplySession(
-        this.options.transport,
-        input.route,
-        projection,
-        this.logger,
-        questionPresenter,
-      );
+      this.cotFailures = 0;
     } catch (error) {
-      // COT lives on a ByteDance-internal host; on any other tenant this fails
-      // with a DNS timeout. Cache the verdict so we pay it once per process.
-      this.cotAvailable = false;
+      this.cotFailures += 1;
+      if (this.cotFailures >= TIER_FAILURES_BEFORE_UNAVAILABLE) {
+        this.cotAvailable = false;
+      }
       this.logger.warn("cot_unavailable", {
         sessionId: input.sessionId,
+        failures: this.cotFailures,
+        retired: !this.cotAvailable,
         errorName: error instanceof Error ? error.name : typeof error,
       });
       return undefined;
     }
+    const projection = new DshCotProjection(
+      cot.writer,
+      input.runId,
+      sourceMessageId,
+      { toolDetailMode: config.toolDetailMode },
+    );
+    try {
+      await projection.start(input.query);
+    } catch (error) {
+      // The COT message already exists. Close it rather than leaving a chain
+      // that never stops loading, and degrade this turn only: a failed write
+      // says nothing about whether the tenant supports COT at all.
+      await projection.finish("error").catch(() => undefined);
+      this.logger.warn("cot_start_failed", {
+        sessionId: input.sessionId,
+        cotId: cot.cotId,
+        errorName: error instanceof Error ? error.name : typeof error,
+      });
+      return undefined;
+    }
+    this.logger.info("cot_created", {
+      sessionId: input.sessionId,
+      cotId: cot.cotId,
+      messageId: cot.messageId,
+    });
+    return new CotReplySession(
+      this.options.transport,
+      input.route,
+      projection,
+      this.logger,
+      questionPresenter,
+    );
   }
 
   private currentConfig(): ResolvedReplyChannelConfig {
@@ -683,6 +746,7 @@ export class LarkReplyChannel {
 interface ResolvedReplyChannelConfig {
   enableCardKit: boolean;
   enableCot: boolean;
+  progressSurface: ProgressSurface;
   alwaysPostFinal: boolean;
   printFrequencyMs: number;
   printStep: number;
@@ -701,6 +765,7 @@ function resolveReplyChannelConfig(
   return {
     enableCardKit: config.enableCardKit ?? true,
     enableCot: config.enableCot ?? true,
+    progressSurface: config.progressSurface ?? "cot",
     alwaysPostFinal: config.alwaysPostFinal ?? false,
     printFrequencyMs: config.printFrequencyMs ?? 70,
     printStep: config.printStep ?? 1,

@@ -7,18 +7,18 @@ import {
   type ReplyChannelConfig,
   type ReplyRoute,
   type ReplyTransportPort,
-} from "../src/lark-reply.js";
+} from "../../src/card/reply.js";
 import {
   CARD_ERROR,
   CardKitError,
   LarkCardKitGateway,
   type CardKitApiClientPort,
   type CardKitResponse,
-} from "../src/lark-cardkit.js";
-import type { CotMessage, CotWriterPort } from "../src/cot.js";
-import type { SessionEvent } from "../src/dsh-client.js";
-import { markdownElement, type CardElement } from "../src/lark-card.js";
-import type { MuxEvent } from "../src/session-event-stream.js";
+} from "../../src/card/cardkit.js";
+import type { CotMessage, CotWriterPort } from "../../src/progress/cot.js";
+import type { SessionEvent } from "../../src/dsh/client.js";
+import { markdownElement, type CardElement } from "../../src/card/schema.js";
+import type { MuxEvent } from "../../src/dsh/session-event-stream.js";
 
 const ROUTE: ReplyRoute = {
   chatId: "oc_1",
@@ -43,14 +43,17 @@ interface Journal {
     replyInThread: boolean;
   }[];
   cots: number;
+  cotAttempts: number;
   cotCompleted: string[];
   cardOps: { operation: string; data: Record<string, unknown> }[];
 }
 
-function cotWriter(journal: Journal): CotWriterPort {
+function cotWriter(journal: Journal, flushError?: Error): CotWriterPort {
   return {
     write: () => undefined,
-    flush: async () => undefined,
+    flush: async () => {
+      if (flushError !== undefined) throw flushError;
+    },
     complete: async (reason) => {
       journal.cotCompleted.push(reason);
     },
@@ -61,6 +64,7 @@ function harness(options?: {
   cardCreateError?: CardKitError;
   cardContentError?: CardKitError;
   cotError?: Error;
+  cotWriteError?: Error;
   deleteMessageError?: Error;
   withCardKit?: boolean;
   withCot?: boolean;
@@ -74,6 +78,7 @@ function harness(options?: {
     deletedMessages: [],
     cards: [],
     cots: 0,
+    cotAttempts: 0,
     cotCompleted: [],
     cardOps: [],
   };
@@ -142,12 +147,13 @@ function harness(options?: {
       ? {}
       : {
           createCot: async (): Promise<CotMessage> => {
+            journal.cotAttempts += 1;
             if (options?.cotError !== undefined) throw options.cotError;
             journal.cots += 1;
             return {
               cotId: "cot_1",
               messageId: "om_cot",
-              writer: cotWriter(journal),
+              writer: cotWriter(journal, options?.cotWriteError),
             };
           },
         }),
@@ -196,7 +202,10 @@ const EVENTS: SessionEvent[] = [
 
 test("prefers the card tier and delivers the answer in the card", async () => {
   const { channel, journal } = harness();
-  assert.equal(channel.preferredTier, "cardkit");
+  // The default surface is the native COT chain, but a top-level message
+  // creates the topic it would have to be attached to, so this route falls
+  // back to the card.
+  assert.equal(channel.preferredTier, "cot");
 
   const session = await open(channel);
   assert.equal(session.tier, "cardkit");
@@ -280,38 +289,81 @@ test("falls back directly to an in-thread post when CardKit cannot create a topi
   assert.deepEqual(journal.posts, ["最终答案"], "exactly one final answer");
 });
 
-test("probes CardKit once per process rather than once per turn", async () => {
+test("retires the CardKit tier after repeated failures, not after one", async () => {
   const { channel, journal } = harness({
     cardCreateError: new CardKitError("no scope", 99991672, "card.create"),
   });
+  const creates = () =>
+    journal.cardOps.filter((call) => call.operation === "card.create").length;
 
-  await (await open(channel)).finalize({ outcome: "done", text: "a" });
-  await (await open(channel)).finalize({ outcome: "done", text: "b" });
+  for (const text of ["a", "b"]) {
+    await (await open(channel)).finalize({ outcome: "done", text });
+  }
+  assert.equal(creates(), 2, "one blip is not a verdict about the deployment");
 
+  for (const text of ["c", "d"]) {
+    await (await open(channel)).finalize({ outcome: "done", text });
+  }
   assert.equal(
-    journal.cardOps.filter((call) => call.operation === "card.create").length,
-    1,
-    "the missing scope is a deployment fact, probed once",
+    creates(),
+    3,
+    "a run of failures is a deployment fact; later turns stop paying for it",
   );
   assert.equal(channel.preferredTier, "cot");
 });
 
-test("probes COT once per process too", async () => {
+test("retires the COT tier after repeated failures, not after one", async () => {
   const { channel, journal } = harness({
     withCardKit: false,
     cotError: new Error("ENOTFOUND fsopen.bytedance.net"),
   });
   assert.equal(channel.preferredTier, "cot");
 
-  const first = await open(channel, EXISTING_TOPIC_ROUTE);
-  assert.equal(first.tier, "post");
-  await first.finalize({ outcome: "done", text: "a" });
-  const second = await open(channel, EXISTING_TOPIC_ROUTE);
-  await second.finalize({ outcome: "done", text: "b" });
+  for (const text of ["a", "b"]) {
+    const session = await open(channel, EXISTING_TOPIC_ROUTE);
+    assert.equal(session.tier, "post");
+    await session.finalize({ outcome: "done", text });
+  }
+  assert.equal(journal.cotAttempts, 2);
 
+  for (const text of ["c", "d"]) {
+    await (await open(channel, EXISTING_TOPIC_ROUTE)).finalize({
+      outcome: "done",
+      text,
+    });
+  }
+  assert.equal(journal.cotAttempts, 3, "the unreachable host is probed no more");
   assert.equal(journal.cots, 0);
   assert.equal(channel.preferredTier, "post");
-  assert.deepEqual(journal.posts, ["a", "b"], "one answer per turn, still delivered");
+  assert.deepEqual(
+    journal.posts,
+    ["a", "b", "c", "d"],
+    "one answer per turn, still delivered",
+  );
+});
+
+test("a topic that already exists shows the native COT chain by default", async () => {
+  const { channel, journal } = harness();
+
+  const session = await open(channel, EXISTING_TOPIC_ROUTE);
+  assert.equal(session.tier, "cot", "COT outranks the card by default");
+  assert.equal(journal.cots, 1);
+  assert.equal(journal.cards.length, 0, "no card is created beside the chain");
+
+  const delivery = await session.finalize({ outcome: "done", text: "最终答案" });
+  assert.equal(delivery.tier, "cot");
+  assert.deepEqual(journal.cotCompleted, ["done"]);
+  assert.deepEqual(journal.posts, ["最终答案"]);
+});
+
+test("progressSurface card keeps the old card-first order", async () => {
+  const { channel, journal } = harness({ config: { progressSurface: "card" } });
+  assert.equal(channel.preferredTier, "cardkit");
+
+  const session = await open(channel, EXISTING_TOPIC_ROUTE);
+  assert.equal(session.tier, "cardkit");
+  assert.equal(journal.cots, 0, "the card carries the progress instead");
+  await session.finalize({ outcome: "done", text: "最终答案" });
 });
 
 test("degrades to a post reply when the card dies mid-turn", async () => {
@@ -615,4 +667,42 @@ test("removes standalone question content when message withdrawal fails", async 
     ),
     "the question itself is removed even when the message cannot be withdrawn",
   );
+});
+
+test("a COT that cannot be written degrades this turn, not the tier", async () => {
+  const { channel, journal } = harness({
+    withCardKit: false,
+    cotWriteError: new Error("message_cot.update failed"),
+  });
+
+  const session = await open(channel, EXISTING_TOPIC_ROUTE);
+  assert.equal(session.tier, "post", "the turn falls through to a post reply");
+  assert.deepEqual(
+    journal.cotCompleted,
+    ["error"],
+    "the chain it already created is closed rather than left loading",
+  );
+  assert.equal(
+    channel.preferredTier,
+    "cot",
+    "a failed write says nothing about whether the tenant supports COT",
+  );
+  await session.finalize({ outcome: "done", text: "最终答案" });
+  assert.deepEqual(journal.posts, ["最终答案"]);
+});
+
+test("a turn with no prose still delivers a body Feishu accepts", async () => {
+  const { channel, journal } = harness({ withCardKit: false, withCot: false });
+
+  await (await open(channel)).finalize({ outcome: "done", text: "" });
+  await (await open(channel)).finalize({ outcome: "interrupted", text: "  " });
+  await (await open(channel)).finalize({ outcome: "timeout", text: "" });
+  await (await open(channel)).finalize({ outcome: "error", text: "" });
+
+  assert.deepEqual(journal.posts, [
+    "DeepSeek Harness 未生成文本回复。",
+    "已停止。",
+    "DeepSeek Harness 执行超时。",
+    "DeepSeek Harness 执行失败。",
+  ]);
 });
