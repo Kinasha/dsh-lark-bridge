@@ -16,7 +16,7 @@ import {
   historySince,
   normalizeToolEventView,
   waitForCompletedTurn,
-} from "./dsh-client.js";
+} from "./client.js";
 import {
   SessionEventStream,
   waitForTurnFromStream,

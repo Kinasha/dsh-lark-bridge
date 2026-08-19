@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ApiProxy } from "@deepseek-ai/dsh-host-apiproxy/api";
-import { ApiProxyDshClient } from "../src/api-proxy-client.js";
-import { CardStepsProjection } from "../src/lark-card-stream.js";
+import { ApiProxyDshClient } from "../../src/dsh/api-proxy-client.js";
+import { CardStepsProjection } from "../../src/card/stream.js";
 
 function success<T>(value: T) {
   return Promise.resolve({ result: { ok: true as const, value } });

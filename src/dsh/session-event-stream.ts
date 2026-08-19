@@ -24,8 +24,8 @@
 import {
   normalizeToolEventView,
   type SessionEvent,
-} from "./dsh-client.js";
-import { silentLogger, type SemanticLogger } from "./logger.js";
+} from "./client.js";
+import { silentLogger, type SemanticLogger } from "../logger.js";
 
 export const DEFAULT_RECONNECT_DELAY_MS = 500;
 export const DEFAULT_MAX_RECONNECT_DELAY_MS = 15_000;

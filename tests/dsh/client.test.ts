@@ -5,7 +5,7 @@ import {
   DshClient,
   sessionIdForTopic,
   type SessionEvent,
-} from "../src/dsh-client.js";
+} from "../../src/dsh/client.js";
 
 test("session id is stable per topic and does not expose Lark ids", () => {
   const first = sessionIdForTopic("oc_secret_chat", "om_secret_root");

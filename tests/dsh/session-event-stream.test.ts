@@ -8,8 +8,8 @@ import {
   type ClientResponseMessage,
   type MuxEvent,
   type SessionEventSourcePort,
-} from "../src/session-event-stream.js";
-import { completedTurnAfter, type SessionEvent } from "../src/dsh-client.js";
+} from "../../src/dsh/session-event-stream.js";
+import { completedTurnAfter, type SessionEvent } from "../../src/dsh/client.js";
 
 // Regression lock, type level only: the real ApiProxy must keep satisfying the
 // port, so this module never drifts from the harness contract.
