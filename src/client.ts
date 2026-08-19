@@ -31,10 +31,8 @@ const en = {
   showSettings: "Show settings",
   hideSettings: "Hide settings",
   enabled: "Enable bridge",
-  installBundledPreset: "Install bundled safe preset",
   workspacePath: "Workspace path",
   workspaceTitle: "Workspace title",
-  agentPreset: "Agent preset",
   allowedSenderIds: "Sender allowlist",
   blockedSenderIds: "Sender blocklist",
   listHint: "One sender open_id per line. The blocklist takes precedence.",
@@ -45,6 +43,42 @@ const en = {
   enableUserAuth: "Enable Web user authorization",
   userAuthStatePath: "User authorization state file",
   userAuthRedirectUri: "OAuth redirect URI",
+  appId: "App ID",
+  domain: "Open platform",
+  replyMode: "Reply style",
+  replyModeHint: "\"card\" streams the answer into a Feishu card; \"post\" sends one rich-text reply.",
+  enableCardKit: "Allow streaming cards",
+  enableCot: "Allow native COT (ByteDance tenants)",
+  alwaysPostFinal: "Also send a plain reply",
+  streamPrintFrequencyMs: "Typewriter interval (ms)",
+  streamPrintStep: "Characters per tick",
+  streamElementMaxChars: "Characters per card component",
+  enableHtmlReports: "Host HTML reports locally",
+  htmlReportOrigin: "Report origin override",
+  htmlReportTtlMs: "Report lifetime (ms)",
+  enableCardActions: "Accept card button callbacks",
+  enableApprovals: "Let Lark users approve tool calls",
+  approvalsHint: "Off by default: it lets a chat identity authorize workspace changes.",
+  enableQuestions: "Render agent questions as buttons",
+  enableInboundResources: "Read attached images",
+  maxInboundImages: "Images per message",
+  maxInboundImageBytes: "Bytes per image",
+  enableBotMenu: "Handle bot menu events",
+  enableReactionCommands: "Reactions act as commands",
+  interruptEmoji: "Interrupt reaction emoji_type",
+  useEventStream: "Receive events by push",
+  allowSlashCommands: "Allow DSH slash commands from Lark",
+  slashHint: "Off by default: a message starting with / would bypass the model.",
+  credentials: "Bot credentials",
+  appSecret: "App Secret",
+  credentialConfigured: "Configured",
+  credentialMissing: "Not set",
+  credentialFrom: "From",
+  credentialReadOnly: "Supplied by the environment; read-only here.",
+  credentialSave: "Save secret",
+  credentialClear: "Clear",
+  credentialPlaceholder: "Enter to replace; never displayed",
+  openBotConfig: "Open bot configuration",
 };
 
 const zh: typeof en = {
@@ -63,10 +97,8 @@ const zh: typeof en = {
   showSettings: "显示设置",
   hideSettings: "收起设置",
   enabled: "启用飞书桥接",
-  installBundledPreset: "安装内置安全 Preset",
   workspacePath: "Workspace 路径",
   workspaceTitle: "Workspace 标题",
-  agentPreset: "Agent Preset",
   allowedSenderIds: "发送者白名单",
   blockedSenderIds: "发送者黑名单",
   listHint: "每行填写一个 sender open_id；黑名单优先。",
@@ -77,6 +109,42 @@ const zh: typeof en = {
   enableUserAuth: "启用 Web 用户身份授权",
   userAuthStatePath: "用户授权状态文件",
   userAuthRedirectUri: "OAuth 回调地址",
+  appId: "App ID",
+  domain: "开放平台",
+  replyMode: "回复形态",
+  replyModeHint: "card 以飞书卡片流式输出；post 发送一条富文本回复。",
+  enableCardKit: "允许流式卡片",
+  enableCot: "允许原生 COT（字节租户）",
+  alwaysPostFinal: "同时发送纯文本回复",
+  streamPrintFrequencyMs: "打字机间隔（毫秒）",
+  streamPrintStep: "每次显示字符数",
+  streamElementMaxChars: "单个卡片组件字符上限",
+  enableHtmlReports: "本地托管 HTML 报告",
+  htmlReportOrigin: "报告地址覆盖",
+  htmlReportTtlMs: "报告保留时长（毫秒）",
+  enableCardActions: "接收卡片按钮回调",
+  enableApprovals: "允许飞书用户批准工具调用",
+  approvalsHint: "默认关闭：这会让一个聊天身份获得授权变更工作区的能力。",
+  enableQuestions: "以按钮呈现助手提问",
+  enableInboundResources: "读取消息中的图片",
+  maxInboundImages: "单条消息图片数上限",
+  maxInboundImageBytes: "单张图片字节上限",
+  enableBotMenu: "处理机器人菜单事件",
+  enableReactionCommands: "表情回复作为指令",
+  interruptEmoji: "中断所用的 emoji_type",
+  useEventStream: "以推送方式接收事件",
+  allowSlashCommands: "允许飞书消息触发 DSH 斜杠命令",
+  slashHint: "默认关闭：以 / 开头的消息会绕过模型直接执行命令。",
+  credentials: "机器人凭据",
+  appSecret: "App Secret",
+  credentialConfigured: "已配置",
+  credentialMissing: "未配置",
+  credentialFrom: "来源",
+  credentialReadOnly: "由环境变量提供，此处只读。",
+  credentialSave: "保存密钥",
+  credentialClear: "清除",
+  credentialPlaceholder: "输入以替换；永不回显",
+  openBotConfig: "打开飞书机器人配置",
 };
 
 type LocaleKey = keyof typeof en;
@@ -87,12 +155,114 @@ declare module "@deepseek-ai/dsh-client-ui-slots" {
   }
 }
 
+export interface CredentialStatus {
+  configured: boolean;
+  source?: string;
+  writable: boolean;
+}
+
 interface Descriptor {
   writable: boolean;
   revision: number;
   value: Config;
   base?: Partial<Config>;
   user?: Partial<Config>;
+  /** `schema.toJSON()`; field kinds are derived from it, never hardcoded. */
+  schema?: unknown;
+  credentials?: Record<string, CredentialStatus>;
+}
+
+/** The subset of a serialized schemastery node this form reads. */
+export interface SchemaNode {
+  type?: string;
+  dict?: Record<string, SchemaNode | number>;
+  list?: Array<SchemaNode | number>;
+  value?: unknown;
+  meta?: { default?: unknown; description?: unknown };
+}
+
+/** Resolves the `uid + refs` graph emitted by Schemastery `toJSON()`. */
+export function schemaDictionary(serialized: unknown): Record<string, SchemaNode> {
+  if (typeof serialized !== "object" || serialized === null) return {};
+  const graph = serialized as {
+    uid?: number;
+    refs?: Record<string, SchemaNode>;
+    dict?: Record<string, SchemaNode>;
+  };
+  if (graph.dict !== undefined) return graph.dict;
+  if (graph.uid === undefined || graph.refs === undefined) return {};
+
+  const cache = new Map<number, SchemaNode>();
+  const resolve = (value: SchemaNode | number | undefined): SchemaNode | undefined => {
+    if (value === undefined) return undefined;
+    if (typeof value !== "number") return value;
+    const cached = cache.get(value);
+    if (cached !== undefined) return cached;
+    const source = graph.refs?.[String(value)];
+    if (source === undefined) return undefined;
+    const node: SchemaNode = {
+      ...(source.type === undefined ? {} : { type: source.type }),
+      ...(source.value === undefined ? {} : { value: source.value }),
+      ...(source.meta === undefined ? {} : { meta: source.meta }),
+    };
+    cache.set(value, node);
+    if (source.list !== undefined) {
+      node.list = source.list
+        .map((entry) => resolve(entry))
+        .filter((entry): entry is SchemaNode => entry !== undefined);
+    }
+    if (source.dict !== undefined) {
+      node.dict = Object.fromEntries(
+        Object.entries(source.dict)
+          .map(([key, entry]) => [key, resolve(entry)] as const)
+          .filter((entry): entry is readonly [string, SchemaNode] => entry[1] !== undefined),
+      );
+    }
+    return node;
+  };
+
+  const root = resolve(graph.uid);
+  return Object.fromEntries(
+    Object.entries(root?.dict ?? {}).filter(
+      (entry): entry is [string, SchemaNode] => typeof entry[1] !== "number",
+    ),
+  );
+}
+
+export type FieldKind = "boolean" | "number" | "list" | "select" | "text";
+
+export function larkOpenPlatformUrl(
+  appId: string,
+  domain: "feishu" | "lark",
+): string | undefined {
+  const normalized = appId.trim();
+  if (!normalized) return undefined;
+  const origin = domain === "lark"
+    ? "https://open.larksuite.com"
+    : "https://open.feishu.cn";
+  return `${origin}/app/${encodeURIComponent(normalized)}`;
+}
+
+/**
+ * Derives each field's control from the schema the host serializes.
+ *
+ * The previous three hardcoded Sets had to track `Config` by hand; a new field
+ * silently rendered as a text box and saved the wrong type.
+ */
+export function fieldKind(node: SchemaNode | undefined): FieldKind {
+  if (node?.type === "boolean") return "boolean";
+  if (node?.type === "number") return "number";
+  // `SenderIdList` is a transform over `any`; it is the only list field.
+  if (node?.type === "transform") return "list";
+  if (node?.type === "union" && (node.list?.length ?? 0) > 0) return "select";
+  return "text";
+}
+
+export function selectOptions(node: SchemaNode | undefined): string[] {
+  return (node?.list ?? [])
+    .filter((entry): entry is SchemaNode => typeof entry !== "number")
+    .map((entry) => entry.value)
+    .filter((value): value is string => typeof value === "string");
 }
 
 type FieldName = keyof Config;
@@ -103,41 +273,74 @@ type Dirty = Partial<Record<FieldName, "set" | "unset">>;
 const DEFAULTS: Config = {
   enabled: true,
   workspacePath: ".",
-  agentPreset: "dsh-lark-safe",
-  installBundledPreset: true,
   allowedSenderIds: [],
   blockedSenderIds: [],
   maxConcurrentTopics: 4,
   maxPendingMessages: 256,
   eventRetentionMs: 604_800_000,
   enableUserAuth: true,
+  domain: "feishu",
+  replyMode: "post",
+  enableCardKit: true,
+  enableCot: true,
+  alwaysPostFinal: false,
+  streamPrintFrequencyMs: 70,
+  streamPrintStep: 1,
+  streamElementMaxChars: 30_000,
+  enableHtmlReports: true,
+  htmlReportTtlMs: 86_400_000,
+  enableCardActions: true,
+  enableApprovals: false,
+  enableQuestions: true,
+  enableInboundResources: true,
+  maxInboundImages: 4,
+  maxInboundImageBytes: 5_000_000,
+  enableBotMenu: true,
+  enableReactionCommands: true,
+  interruptEmoji: "X",
+  useEventStream: true,
+  allowSlashCommands: false,
 };
 
-const BOOLEAN_FIELDS = new Set<FieldName>([
-  "enabled",
-  "installBundledPreset",
-  "enableUserAuth",
-]);
-const LIST_FIELDS = new Set<FieldName>([
-  "allowedSenderIds",
-  "blockedSenderIds",
-]);
-const NUMBER_FIELDS = new Set<FieldName>([
-  "maxConcurrentTopics",
-  "maxPendingMessages",
-  "eventRetentionMs",
-]);
+/** Fallback used only when the host serves no schema (older builds). */
+const FALLBACK_KINDS: Partial<Record<FieldName, FieldKind>> = {
+  enabled: "boolean",
+  enableUserAuth: "boolean",
+  allowedSenderIds: "list",
+  blockedSenderIds: "list",
+  maxConcurrentTopics: "number",
+  maxPendingMessages: "number",
+  eventRetentionMs: "number",
+};
 
-const FIELDS: Array<{
+let schemaNodes: Record<string, SchemaNode> | undefined;
+
+function kindOf(name: FieldName): FieldKind {
+  const node = schemaNodes?.[name];
+  if (node !== undefined) return fieldKind(node);
+  return FALLBACK_KINDS[name] ?? "text";
+}
+
+const BOOLEAN_FIELDS = { has: (name: FieldName) => kindOf(name) === "boolean" };
+const LIST_FIELDS = { has: (name: FieldName) => kindOf(name) === "list" };
+const NUMBER_FIELDS = {
+  has: (name: FieldName) => kindOf(name) === "number",
+  [Symbol.iterator]: function* (): Generator<FieldName> {
+    for (const name of Object.keys(schemaNodes ?? FALLBACK_KINDS) as FieldName[]) {
+      if (kindOf(name) === "number") yield name;
+    }
+  },
+};
+
+export const FIELDS: Array<{
   name: FieldName;
   label: LocaleKey;
   wide?: boolean;
 }> = [
+  { name: "appId", label: "appId", wide: true },
   { name: "enabled", label: "enabled" },
-  { name: "installBundledPreset", label: "installBundledPreset" },
   { name: "workspacePath", label: "workspacePath" },
   { name: "workspaceTitle", label: "workspaceTitle" },
-  { name: "agentPreset", label: "agentPreset" },
   { name: "maxConcurrentTopics", label: "maxConcurrentTopics" },
   { name: "allowedSenderIds", label: "allowedSenderIds", wide: true },
   { name: "blockedSenderIds", label: "blockedSenderIds", wide: true },
@@ -147,6 +350,28 @@ const FIELDS: Array<{
   { name: "enableUserAuth", label: "enableUserAuth", wide: true },
   { name: "userAuthStatePath", label: "userAuthStatePath", wide: true },
   { name: "userAuthRedirectUri", label: "userAuthRedirectUri", wide: true },
+  { name: "domain", label: "domain" },
+  { name: "replyMode", label: "replyMode" },
+  { name: "enableCardKit", label: "enableCardKit" },
+  { name: "enableCot", label: "enableCot" },
+  { name: "alwaysPostFinal", label: "alwaysPostFinal" },
+  { name: "streamPrintFrequencyMs", label: "streamPrintFrequencyMs" },
+  { name: "streamPrintStep", label: "streamPrintStep" },
+  { name: "streamElementMaxChars", label: "streamElementMaxChars" },
+  { name: "enableHtmlReports", label: "enableHtmlReports" },
+  { name: "htmlReportTtlMs", label: "htmlReportTtlMs" },
+  { name: "htmlReportOrigin", label: "htmlReportOrigin", wide: true },
+  { name: "enableCardActions", label: "enableCardActions" },
+  { name: "enableApprovals", label: "enableApprovals", wide: true },
+  { name: "enableQuestions", label: "enableQuestions" },
+  { name: "enableInboundResources", label: "enableInboundResources" },
+  { name: "maxInboundImages", label: "maxInboundImages" },
+  { name: "maxInboundImageBytes", label: "maxInboundImageBytes" },
+  { name: "enableBotMenu", label: "enableBotMenu" },
+  { name: "enableReactionCommands", label: "enableReactionCommands" },
+  { name: "interruptEmoji", label: "interruptEmoji" },
+  { name: "useEventStream", label: "useEventStream" },
+  { name: "allowSlashCommands", label: "allowSlashCommands", wide: true },
 ];
 
 const STYLE = `
@@ -231,8 +456,39 @@ function createSettingsCard(ctx: ClientContext) {
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState("");
     const [saved, setSaved] = useState(false);
+    const [secret, setSecret] = useState("");
+
+    /**
+     * Credentials travel on their own operations, not through the settings
+     * revision: the value goes in and never comes back, so there is nothing to
+     * fence and nothing that could be echoed to the browser.
+     */
+    const writeCredential = async (
+      operation: { op: "credential-set"; ref: string; value: string } | { op: "credential-unset"; ref: string },
+    ) => {
+      if (descriptor === undefined || saving) return;
+      setSaving(true);
+      setError("");
+      try {
+        const response = await fetch(API_PATH, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ revision: descriptor.revision, ops: [operation] }),
+        });
+        const body = (await response.json()) as { error?: string };
+        if (!response.ok) throw new Error(body.error ?? "credential write failed");
+        setSecret("");
+        setSaved(true);
+        adopt(await readDescriptor());
+      } catch (reason: unknown) {
+        setError(reason instanceof Error ? reason.message : String(reason));
+      } finally {
+        setSaving(false);
+      }
+    };
 
     const adopt = (next: Descriptor) => {
+      schemaNodes = schemaDictionary(next.schema);
       setDescriptor(next);
       setDrafts(draftsFrom(next.value));
       setDirty({});
@@ -322,9 +578,11 @@ function createSettingsCard(ctx: ClientContext) {
     const fieldNodes = descriptor === undefined
       ? []
       : FIELDS.map(({ name, label, wide }) => {
-          const isBoolean = BOOLEAN_FIELDS.has(name);
-          const isList = LIST_FIELDS.has(name);
-          const isNumber = NUMBER_FIELDS.has(name);
+          const kind = kindOf(name);
+          const isBoolean = kind === "boolean";
+          const isList = kind === "list";
+          const isNumber = kind === "number";
+          const options = kind === "select" ? selectOptions(schemaNodes?.[name]) : [];
           const inputId = `plugin-config-lark-${name}`;
           const fieldInvalid = isNumber && dirty[name] === "set" && !positiveInteger(drafts[name]);
           const overridden = dirty[name] === "set" ||
@@ -353,6 +611,15 @@ function createSettingsCard(ctx: ClientContext) {
                   value: String(drafts[name] ?? ""),
                   ...common,
                 })
+              : options.length > 0
+              ? h("select", {
+                  id: inputId,
+                  className: "dsh-lark-input",
+                  value: String(drafts[name] ?? ""),
+                  ...common,
+                }, options.map((option) =>
+                  h("option", { key: option, value: option }, option),
+                ))
               : h("input", {
                   id: inputId,
                   className: "dsh-lark-input",
@@ -391,6 +658,11 @@ function createSettingsCard(ctx: ClientContext) {
           fieldInvalid && h("span", { className: "dsh-lark-error" }, t("invalidNumber")),
           );
         });
+    const [appIdNode, ...otherFieldNodes] = fieldNodes;
+    const openPlatformUrl = larkOpenPlatformUrl(
+      String(drafts.appId ?? ""),
+      drafts.domain === "lark" ? "lark" : "feishu",
+    );
 
     return h("li", { className: `dsh-lark-card${open ? " dsh-lark-card-open" : ""}` },
       h("button", {
@@ -411,7 +683,73 @@ function createSettingsCard(ctx: ClientContext) {
       open && h("div", { className: "dsh-lark-body" },
         h("p", { className: "dsh-lark-note" }, t("restart")),
         loading && h("p", { className: "dsh-lark-status" }, t("loading")),
-        descriptor !== undefined && h("div", { className: "dsh-lark-grid" }, fieldNodes),
+        descriptor !== undefined && h("div", { className: "dsh-lark-grid" },
+          appIdNode,
+          descriptor.credentials !== undefined &&
+          h("div", { className: "dsh-lark-field dsh-lark-field-wide" },
+            h("div", { className: "dsh-lark-label-row" },
+              h("label", { htmlFor: "plugin-config-lark-secret" }, t("appSecret")),
+              h("span", { className: "dsh-lark-badge" },
+                descriptor.credentials.LARK_APP_SECRET?.configured
+                  ? `${t("credentialConfigured")}${
+                      descriptor.credentials.LARK_APP_SECRET.source === undefined
+                        ? ""
+                        : ` · ${t("credentialFrom")} ${descriptor.credentials.LARK_APP_SECRET.source}`
+                    }`
+                  : t("credentialMissing"),
+              ),
+            ),
+            h("input", {
+              id: "plugin-config-lark-secret",
+              className: "dsh-lark-input",
+              type: "password",
+              autoComplete: "off",
+              placeholder: t("credentialPlaceholder"),
+              value: secret,
+              disabled:
+                saving || descriptor.credentials.LARK_APP_SECRET?.writable !== true,
+              onChange: (event: ChangeEvent<HTMLInputElement>) =>
+                setSecret(event.target.value),
+            }),
+            descriptor.credentials.LARK_APP_SECRET?.writable !== true &&
+              h("span", { className: "dsh-lark-hint" }, t("credentialReadOnly")),
+            h("div", { className: "dsh-lark-actions" },
+              h("button", {
+                className: "dsh-lark-button dsh-lark-button-primary",
+                type: "button",
+                disabled:
+                  saving ||
+                  secret.trim() === "" ||
+                  descriptor.credentials.LARK_APP_SECRET?.writable !== true,
+                onClick: () =>
+                  void writeCredential({
+                    op: "credential-set",
+                    ref: "LARK_APP_SECRET",
+                    value: secret,
+                  }),
+              }, t("credentialSave")),
+              h("button", {
+                className: "dsh-lark-button",
+                type: "button",
+                disabled:
+                  saving ||
+                  descriptor.credentials.LARK_APP_SECRET?.configured !== true ||
+                  descriptor.credentials.LARK_APP_SECRET?.writable !== true,
+                onClick: () =>
+                  void writeCredential({ op: "credential-unset", ref: "LARK_APP_SECRET" }),
+              }, t("credentialClear")),
+            ),
+          ),
+          openPlatformUrl !== undefined && h("div", { className: "dsh-lark-actions" },
+            h("a", {
+              className: "dsh-lark-button",
+              href: openPlatformUrl,
+              target: "_blank",
+              rel: "noopener noreferrer",
+            }, t("openBotConfig")),
+          ),
+        ),
+        descriptor !== undefined && h("div", { className: "dsh-lark-grid" }, otherFieldNodes),
         error && h("p", { className: "dsh-lark-error" }, `${t("loadFailed")} ${error}`),
         descriptor !== undefined && h("div", { className: "dsh-lark-actions" },
           h("button", {
@@ -449,8 +787,7 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject("settings.plugin.item", () =>
     ctx.slots.register({
       name: "settings.plugin.item",
-      id: "dsh-lark-bridge",
-      order: 30,
+      key: "dsh-lark-bridge",
       locale: LOCALE_NAMESPACE,
     }, Card),
   );

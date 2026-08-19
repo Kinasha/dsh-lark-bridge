@@ -85,3 +85,27 @@ test("API proxy adapter unwraps gateway failures", async () => {
     /DSH API failed \(HOST_UNAVAILABLE\): offline/,
   );
 });
+
+test("API proxy session creation inherits the DSH default agent composition", async () => {
+  let createPayload: unknown;
+  const api = {
+    sessions: {
+      list: () => success({ items: [] }),
+      create: (request: { payload: unknown }) => {
+        createPayload = request.payload;
+        return success({ sessionId: "session-1" });
+      },
+    },
+  } as unknown as ApiProxy;
+
+  const created = await new ApiProxyDshClient(api).ensureSession(
+    "session-1",
+    "workspace-1",
+  );
+
+  assert.deepEqual(created, { sessionId: "session-1", created: true });
+  assert.deepEqual(createPayload, {
+    workspaceId: "workspace-1",
+    sessionId: "session-1",
+  });
+});

@@ -1,5 +1,4 @@
 import { sessionIdForTopic, type DshBridgeClient } from "./dsh-client.js";
-import { DshCotProjection } from "./cot.js";
 import { DshTopicTurn } from "./dsh-topic-turn.js";
 import {
   type AdmissionDecision,
@@ -13,9 +12,23 @@ import {
   topicRootMessageId,
 } from "./lark.js";
 import type { SemanticLogger } from "./logger.js";
-import { LARK_PRESET, WORKSPACE_PATH } from "./config.js";
+import { WORKSPACE_PATH } from "./config.js";
 import { TopicScheduler } from "./topic-scheduler.js";
+import {
+  LarkReplyChannel,
+  type ReplySession,
+} from "./lark-reply.js";
 import { WebMessageSync } from "./web-message-sync.js";
+
+/**
+ * Escapes a leading `/` unless slash commands are explicitly allowed. DSH runs
+ * a prompt of exactly one text block starting with `/` as a slash command,
+ * bypassing the model entirely.
+ */
+export function guardSlashCommand(text: string, allow: boolean): string {
+  if (allow) return text;
+  return /^\s*\//.test(text) ? text.replace(/^(\s*)\//, "$1\\/") : text;
+}
 
 function sessionTitle(message: LarkMessage): string {
   const preview = message.content.replace(/\s+/g, " ").trim().slice(0, 24);
@@ -57,12 +70,31 @@ export interface BridgeOptions {
   signal?: AbortSignal;
   workspacePath?: string;
   workspaceTitle?: string;
-  agentPreset?: string;
   admission?: EventAdmissionStore;
   maxConcurrentTopics?: number;
   maxPendingMessages?: number;
   logger?: BridgeLogger;
   onReady?(): void;
+  /** Chooses and drives the reply tier; defaults to the plain post path. */
+  replyChannel?: LarkReplyChannel;
+  /**
+   * When false, a message starting with `/` is escaped so DSH treats it as
+   * prose. A prompt whose content is exactly one text block beginning with `/`
+   * is executed as a slash command and never reaches the model, so a Feishu
+   * user could otherwise run DSH commands by typing them.
+   */
+  allowSlashCommands?: boolean;
+  /** Present answerable DSH questions in the active CardKit reply. */
+  enableQuestions?: boolean;
+  questionAnswers?: {
+    answerText(input: {
+      eventId: string;
+      sessionId: string;
+      senderOpenId: string;
+      text: string;
+    }): Promise<boolean>;
+    resolve?(sessionId: string, questionRpcId: string): void;
+  };
 }
 
 export type BridgeLogger = SemanticLogger;
@@ -185,6 +217,15 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
   const logger = options.logger ?? consoleLogger;
   const admission =
     options.admission ?? new EventAdmissionStore(new MemoryAdmissionAdapter());
+  // Defaults to the COT-plus-post behaviour the bridge has always had; the
+  // plugin supplies a channel with the card tier enabled when configured.
+  const replyChannel =
+    options.replyChannel ??
+    new LarkReplyChannel({
+      transport: options.lark,
+      logger,
+      config: { enableCardKit: false, enableCot: true },
+    });
   const scheduler = new TopicScheduler(
     options.maxConcurrentTopics ?? 4,
     options.maxPendingMessages ?? 256,
@@ -238,6 +279,25 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
       signal: shutdown.signal,
       ...(options.onReady === undefined ? {} : { onReady: options.onReady }),
       onMessage: async (message) => {
+        const topicRoot = topicRootMessageId(message);
+        const sessionId = sessionIdForTopic(message.chatId, topicRoot);
+        if (
+          options.enableQuestions !== false &&
+          options.questionAnswers !== undefined &&
+          new Set(["text", "post"]).has(message.messageType) &&
+          (await options.questionAnswers.answerText({
+            eventId: message.eventId,
+            sessionId,
+            senderOpenId: message.senderId,
+            text: message.content,
+          }))
+        ) {
+          logger.info("lark_question_text_answered", {
+            eventId: message.eventId,
+            sessionId,
+          });
+          return;
+        }
         if (message.chatType === "group" && message.mentionedBot !== true) {
           logger.info("event_skipped", {
             eventId: message.eventId,
@@ -245,7 +305,8 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
           });
           return;
         }
-        if (!new Set(["text", "post"]).has(message.messageType)) {
+        const carriesResources = (message.resources?.length ?? 0) > 0;
+        if (!new Set(["text", "post"]).has(message.messageType) && !carriesResources) {
           logger.info("event_skipped", {
             eventId: message.eventId,
             reason: "unsupported_message_type",
@@ -254,8 +315,6 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
           return;
         }
 
-        const topicRoot = topicRootMessageId(message);
-        const sessionId = sessionIdForTopic(message.chatId, topicRoot);
         let decision: AdmissionDecision;
         try {
           decision = await admission.admit({
@@ -309,7 +368,7 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
           await scheduler.schedule(sessionId, async (signal) => {
             workStarted = true;
             let reactionId: string | undefined;
-            let cot: DshCotProjection | undefined;
+            let reply: ReplySession | undefined;
             try {
               try {
                 reactionId = await options.lark.addReaction(
@@ -329,20 +388,28 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
               }
 
               const replyInThread = message.threadId === undefined;
-              const cotSourceMessageId = replyInThread
-                ? topicRoot
-                : message.messageId;
-              try {
-                const cotMessage = await options.lark.createCot({
+              const session = await replyChannel.open({
+                route: {
                   chatId: message.chatId,
-                  sourceMessageId: cotSourceMessageId,
-                  ...(replyInThread ? { replyInThread: true } : {}),
-                });
-                logger.info("cot_created", {
-                  eventId: message.eventId,
-                  cotId: cotMessage.cotId,
-                  messageId: cotMessage.messageId,
-                });
+                  sourceMessageId: message.messageId,
+                  topicRootMessageId: topicRoot,
+                  replyInThread,
+                },
+                sessionId,
+                query: message.content,
+                runId: message.eventId,
+                ownerOpenId: message.senderId,
+              });
+              reply = session;
+              logger.info("reply_channel_opened", {
+                eventId: message.eventId,
+                tier: session.tier,
+                ...(session.cardId === undefined
+                  ? {}
+                  : { cardId: session.cardId }),
+              });
+              if (session.tier !== "post") {
+                // The receipt emoji stands in until a progress surface exists.
                 await clearReaction(
                   options.lark,
                   message.messageId,
@@ -350,27 +417,16 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
                   logger,
                 );
                 reactionId = undefined;
-                cot = new DshCotProjection(
-                  cotMessage.writer,
-                  message.eventId,
-                  cotSourceMessageId,
-                );
-                await cot.start(message.content);
-              } catch (error) {
-                await cot?.finish("error").catch(() => undefined);
-                cot = undefined;
-                logger.warn("cot_start_failed", {
-                  eventId: message.eventId,
-                  errorName: error instanceof Error ? error.name : typeof error,
-                });
               }
 
               const completed = await turn.execute({
                 sessionId,
                 workspaceId: workspace.workspaceId,
-                agentPreset: options.agentPreset ?? LARK_PRESET,
                 title: sessionTitle(message),
-                text: message.content,
+                text: guardSlashCommand(
+                  message.content,
+                  options.allowSlashCommands ?? false,
+                ),
                 signal,
                 onPromptRequest: (rpcId) => {
                   webSync.markBridgePrompt(rpcId);
@@ -393,17 +449,26 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
                   });
                 },
                 onEvents: async (events) => {
-                  if (cot === undefined) return;
-                  try {
-                    await cot.present(events);
-                  } catch (error) {
-                    logger.warn("cot_update_failed", {
-                      eventId: message.eventId,
-                      errorName:
-                        error instanceof Error ? error.name : typeof error,
+                  await reply?.present(events);
+                },
+                onQuestion: async (event) => {
+                  if (options.enableQuestions === false) return;
+                  const presented =
+                    (await reply?.presentQuestion?.(event)) ?? false;
+                  if (!presented) {
+                    logger.warn("lark_question_unavailable", {
+                      sessionId,
+                      questionRpcId: event.rpcId,
+                      tier: session.tier,
                     });
-                    await cot.finish("error").catch(() => undefined);
-                    cot = undefined;
+                  }
+                },
+                onResolved: (event) => {
+                  if (event.type === "question/resolved") {
+                    options.questionAnswers?.resolve?.(
+                      event.sessionId,
+                      event.questionRpcId,
+                    );
                   }
                 },
               });
@@ -414,30 +479,19 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
                   afterSeq: decision.checkpoint.beforeSeq,
                 });
               }
-              if (cot !== undefined) {
-                const outcome =
-                  completed.finishReason === "completed"
-                    ? "done"
-                    : new Set(["cancelled", "interrupted"]).has(
-                          completed.finishReason,
-                        )
-                      ? "interrupted"
-                      : "error";
-                await cot.finish(outcome).catch((error: unknown) => {
-                  logger.warn("cot_finish_failed", {
-                    eventId: message.eventId,
-                    errorName:
-                      error instanceof Error ? error.name : typeof error,
-                  });
-                });
-              }
-              const reply = await options.lark.replyToMessage(
-                {
-                  sourceMessageId: message.messageId,
-                  topicRootMessageId: topicRoot,
-                },
-                completed.finalResponse,
-              );
+              const outcome =
+                completed.finishReason === "completed"
+                  ? "done"
+                  : new Set(["cancelled", "interrupted"]).has(
+                        completed.finishReason,
+                      )
+                    ? "interrupted"
+                    : "error";
+              reply = undefined;
+              const delivery = await session.finalize({
+                outcome,
+                text: completed.finalResponse,
+              });
               await admission
                 .markReplied(message.eventId)
                 .catch((error: unknown) => {
@@ -452,8 +506,10 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
               logger.info("event_handled", {
                 eventId: message.eventId,
                 sessionId,
-                replyId: reply.messageId,
-                threadId: reply.threadId,
+                tier: delivery.tier,
+                ...(delivery.messageId === undefined
+                  ? {}
+                  : { replyId: delivery.messageId }),
                 finishReason: completed.finishReason,
               });
               if (
@@ -469,7 +525,26 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
                     error.message.includes("did not finish")
                   ? "timeout"
                   : "error";
-              await cot?.finish(outcome).catch(() => undefined);
+              // Finalize through the reply session so the card's streaming mode
+              // is closed on this path too; only fall back to a standalone error
+              // reply when no session was ever opened.
+              const failed = reply;
+              reply = undefined;
+              const notified =
+                failed === undefined
+                  ? false
+                  : await failed
+                      .finalize({
+                        outcome,
+                        text: "处理消息时发生错误，请稍后重试。",
+                        // A distinct idempotency key, so a retry that succeeds
+                        // is not deduplicated against this failure notice.
+                        replyKey: `${message.messageId}:error`,
+                      })
+                      .then(
+                        (result) => result.delivered,
+                        () => false,
+                      );
               await admission
                 .release(message.eventId)
                 .catch((releaseError: unknown) => {
@@ -486,7 +561,7 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
                 sessionId,
                 errorName: error instanceof Error ? error.name : typeof error,
               });
-              if (!signal.aborted) {
+              if (!signal.aborted && !notified) {
                 await replyProcessingError(
                   options.lark,
                   message,
@@ -496,6 +571,11 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
               }
               throw error;
             } finally {
+              // A card left in streaming mode would show "generating" forever
+              // and could not answer its own button callbacks.
+              await reply
+                ?.finalize({ outcome: "interrupted", text: "" })
+                .catch(() => undefined);
               await clearReaction(
                 options.lark,
                 message.messageId,

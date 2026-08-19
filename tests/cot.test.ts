@@ -49,7 +49,6 @@ test("Lark COT gateway uses create, write, and complete message_cot APIs", async
   const message = await new LarkCotGateway(client).create({
     chatId: "chat-1",
     sourceMessageId: "source-1",
-    replyInThread: true,
   });
   message.writer.write({
     eventType: "RUN_STARTED",
@@ -65,7 +64,6 @@ test("Lark COT gateway uses create, write, and complete message_cot APIs", async
     data: {
       receive_id: "chat-1",
       origin_message_id: "source-1",
-      reply_in_thread: true,
     },
   });
   assert.deepEqual(requests[1], {

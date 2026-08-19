@@ -33,11 +33,11 @@ export LARK_APP_SECRET=xxx
 - 最终回复使用飞书原生 CommonMark/GFM 富文本展示表格、任务列表和代码块；常见
   Mermaid 流程图、时序图、状态图、类图、ER 图和 XY 图会在本地渲染为 PNG 并
   嵌入飞书富文本，不支持的类型或图片上传失败时保留文本预览或源码。
-- 默认使用 `dsh-lark-safe` preset，只允许读取和搜索 Workspace 文件。
+- 新建飞书 Session 继承 DSH 当前的默认 Agent 配置，不再安装或强制选择额外 preset。
 - 插件负责飞书鉴权、WebSocket 自动重连、事件规范化、幂等回复和优雅退出。
 - COT 不包含模型隐藏推理、工具参数或文件内容；COT/表情接口不可用时会降级为普通文本回复。
 
-当前 `0.0.7` 兼容 `@deepseek-ai/dsh@0.1.0-rc.6`。DSH 仍处于 developer
+当前 `0.0.8` 兼容 `@deepseek-ai/dsh@0.1.0-rc.7`。DSH 仍处于 developer
 preview，升级 DSH 后请重新执行本文的验证步骤。
 
 ## 1. 准备飞书应用
@@ -51,8 +51,20 @@ preview，升级 DSH 后请重新执行本文的验证步骤。
    若要让 Web 输入显示为用户本人，还需开通 `im:message` 和
    `im:message.send_as_user`。插件在用户 OAuth 时还会申请 `offline_access`，用于
    自动刷新用户访问凭证。
+
+   以下为可选能力所需的额外权限，未开通时插件自动降级、不会失败：
+
+   | 能力 | 权限 | 未开通时的行为 |
+   | --- | --- | --- |
+   | 流式卡片回复（`replyMode=card`） | `cardkit:card:write` | 回退到 COT 或 post 回复 |
+   | 读取用户发送的图片 | `im:message`、`im:message:readonly` 或 `im:message.history:readonly` | 图片被忽略，正文照常处理 |
+   | 表情指令（如 ❌ 中断） | `im:message.reactions:read` | 表情事件不触发任何操作 |
+
 3. 在事件订阅中选择“使用长连接接收事件”，订阅
-   `im.message.receive_v1`。
+   `im.message.receive_v1`。按需再订阅
+   `im.message.reaction.created_v1`（表情指令）与
+   `application.bot.menu_v6`（机器人菜单，仅单聊）。卡片按钮回调
+   `card.action.trigger` 走同一条长连接，无需公网 webhook，也不需要额外权限。
 4. 发布应用版本，并确保当前测试用户可以使用该应用。
 
 用户身份授权还要求在“安全设置”中添加重定向 URL。默认 Web 端口下为：
@@ -78,7 +90,7 @@ git clone https://github.com/Kinasha/dsh-lark-bridge.git
 cd dsh-lark-bridge
 npm ci
 npm pack
-dsh plugin --profile web add ./open-aiden-dsh-lark-bridge-0.0.7.tgz \
+dsh plugin --profile web add ./open-aiden-dsh-lark-bridge-0.0.8.tgz \
   --allow-build=protobufjs
 ```
 
@@ -87,7 +99,7 @@ dsh plugin --profile web add ./open-aiden-dsh-lark-bridge-0.0.7.tgz \
 可以访问 bnpm 的用户也可以直接安装已发布的包：
 
 ```bash
-dsh plugin --profile web add @open-aiden/dsh-lark-bridge@0.0.7 \
+dsh plugin --profile web add @open-aiden/dsh-lark-bridge@0.0.8 \
   --registry=https://bnpm.byted.org \
   --allow-build=protobufjs
 ```
@@ -120,8 +132,7 @@ dsh plugin --profile web exec dsh-lark-bridge doctor
 ```
 
 `doctor` 会用 App ID 和 App Secret 请求当前 bot identity，但不会输出 App
-Secret；它还会安装 `dsh-lark-safe` preset，并报告当前进程是否能看到
-`DEEPSEEK_API_KEY`。如果同名 preset 已存在但内容不同，命令会报错且不会覆盖。
+Secret；同时会报告当前进程是否能看到 `DEEPSEEK_API_KEY`。
 
 ## 3. 启动 DSH
 
@@ -157,7 +168,7 @@ DSH 插件都已就绪。然后打开 DSH 输出的 Web 地址，通常是
 2. 机器人为首条消息创建话题；话题中的 COT 消息展示分析状态和 `read`、`glob`、
    `grep` 等工具调用进度。
 3. DSH Web UI 中出现一个标题以 `飞书 ·` 开头的新 Session。
-4. Session 使用 `dsh-lark-safe` preset，时间线中可以看到完整的真实工具调用与结果。
+4. Session 继承 DSH 当前默认 Agent 配置，时间线中可以看到完整的真实工具调用与结果。
 5. DSH 完成 Turn 后，最终答案回复在同一话题下。
 6. 在该话题内继续发送消息，会复用同一个 DSH Session；另起一条私聊消息则创建
    新话题和新 Session。
@@ -168,6 +179,16 @@ DSH 插件都已就绪。然后打开 DSH 输出的 Web 地址，通常是
    DSH 后生效。
 9. 在 Web UI 中打开该 Session 并继续发送消息，原飞书话题会以本人身份显示用户
    输入；如果授权尚未完成或已经失效，则显示机器人发送的引用格式，并继续正常执行。
+10. 将 `replyMode` 设为 `card` 并保持 `enableQuestions=true` 后，Agent 发起
+    `AskUserQuestion` 时，当前流式卡片会插入问题和选项按钮。单选直接提交；多选先
+    逐项选择，再点“提交选择”；没有选项或需要自定义答案时，直接在当前飞书话题中
+    回复文本。一个请求包含多个问题时，插件会收齐整批答案，再使用原始 `rpcId`
+    一次性回复 DSH。
+
+问题按钮只接受发起该话题的飞书用户操作，并校验卡片消息 ID 与一次性 nonce。其他
+用户、其他卡片或重复点击不会获得回答能力。`card.action.trigger` 通过与消息相同的
+长连接处理，不需要公网 webhook；CardKit 不可用时仍可继续执行普通回复，但不能在
+飞书侧回答等待中的 `AskUserQuestion`，此时应在 DSH Web UI 中处理。
 
 当前插件接收私聊中的 `text` 和 `post` 消息；群聊只处理明确 `@机器人` 的这两类
 消息，未提及机器人的群消息和其他消息类型会被忽略。
@@ -189,7 +210,6 @@ Agent 知道 DSH Session 的准确 Workspace 路径；询问“你的工作区�
 | `DSH_LARK_ENABLED` | `string` | `1` | `0` | 设为 `0` 时不启动飞书消费者 |
 | `DSH_LARK_WORKSPACE` | `string` | DSH 启动目录 | `/path/to/project` | 飞书 Session 使用的 Workspace |
 | `DSH_LARK_WORKSPACE_TITLE` | `string` | 保留 DSH 标题 | `MyProject` | 显式覆盖 Web UI 中的 Workspace 名称 |
-| `DSH_LARK_AGENT_PRESET` | `string` | `dsh-lark-safe` | `dsh-lark-safe` | 新建飞书 Session 使用的 Agent preset |
 | `DSH_LARK_ALLOWED_SENDERS` | `string` | 空，允许所有可访问应用的用户 | `ou_a,ou_b` | 逗号分隔的飞书 sender open ID allowlist |
 | `DSH_LARK_BLOCKED_SENDERS` | `string` | 空 | `ou_bad_a,ou_bad_b` | 逗号分隔的 sender open ID blocklist；优先于 allowlist |
 | `DSH_LARK_MAX_CONCURRENT_TOPICS` | `number` | `4` | `8` | 不同话题可同时运行的最大 DSH Turn 数；同一话题始终串行 |
@@ -199,6 +219,28 @@ Agent 知道 DSH Session 的准确 Workspace 路径；询问“你的工作区�
 | `DSH_LARK_USER_AUTH_ENABLED` | `string` | `1` | `0` | 设为 `0` 时关闭 Web 用户身份授权，并始终使用引用格式降级 |
 | `DSH_LARK_USER_AUTH_STATE_PATH` | `string` | `$DSH_HOME/dsh-lark-bridge/user-auth.json` | `/secure/state/user-auth.json` | 用户 OAuth Token 状态文件；以 `0600` 原子写入并自动刷新 |
 | `DSH_LARK_USER_AUTH_REDIRECT_URI` | `string` | 当前回环 Web Host 的 `/dsh-lark/auth/callback` | `http://127.0.0.1:3080/dsh-lark/auth/callback` | 必须与飞书开放平台登记的重定向 URL 完全一致 |
+| `DSH_LARK_DOMAIN` | `string` | `feishu` | `lark` | 开放平台域：`feishu`（中国）或 `lark`（国际） |
+| `DSH_LARK_REPLY_MODE` | `string` | `post` | `card` | `card` 使用 CardKit 流式卡片；`post` 为一条富文本回复 |
+| `DSH_LARK_CARDKIT_ENABLED` | `string` | `1` | `0` | 关闭流式卡片这一层 |
+| `DSH_LARK_COT_ENABLED` | `string` | `1` | `0` | 关闭原生 COT 这一层（仅字节租户可用） |
+| `DSH_LARK_ALWAYS_POST_FINAL` | `string` | `0` | `1` | 卡片之外再发一条纯文本回复，兼容 7.20 以下客户端 |
+| `DSH_LARK_STREAM_PRINT_FREQUENCY_MS` | `number` | `70` | `40` | 打字机间隔；飞书 7.23 起生效 |
+| `DSH_LARK_STREAM_PRINT_STEP` | `number` | `1` | `2` | 每次显示的字符数 |
+| `DSH_LARK_STREAM_ELEMENT_MAX_CHARS` | `number` | `30000` | `20000` | 单个卡片组件的字符上限，超出后滚动到新组件 |
+| `DSH_LARK_HTML_REPORTS_ENABLED` | `string` | `1` | `0` | 关闭 HTML 报告的本地托管与卡片按钮 |
+| `DSH_LARK_HTML_REPORT_ORIGIN` | `string` | 当前回环 Web Host | `http://192.168.1.10:3080` | 飞书客户端与 DSH 不同机时覆盖报告地址 |
+| `DSH_LARK_HTML_REPORT_TTL_MS` | `number` | `86400000`（24 小时） | `3600000` | 已托管报告的保留时长 |
+| `DSH_LARK_CARD_ACTIONS_ENABLED` | `string` | `1` | `0` | 关闭卡片按钮回调 |
+| `DSH_LARK_APPROVALS_ENABLED` | `string` | `0` | `1` | 允许飞书用户批准工具调用；默认关闭，见 ADR-0008 |
+| `DSH_LARK_QUESTIONS_ENABLED` | `string` | `1` | `0` | 关闭以卡片按钮呈现助手提问 |
+| `DSH_LARK_INBOUND_RESOURCES_ENABLED` | `string` | `1` | `0` | 关闭读取消息中的图片 |
+| `DSH_LARK_MAX_INBOUND_IMAGES` | `number` | `4` | `1` | 单条消息最多读取的图片数 |
+| `DSH_LARK_MAX_INBOUND_IMAGE_BYTES` | `number` | `5000000` | `2000000` | 单张图片的字节上限，超限即中断下载 |
+| `DSH_LARK_BOT_MENU_ENABLED` | `string` | `1` | `0` | 关闭机器人菜单事件处理 |
+| `DSH_LARK_REACTION_COMMANDS_ENABLED` | `string` | `1` | `0` | 关闭表情指令 |
+| `DSH_LARK_INTERRUPT_EMOJI` | `string` | `X` | `DONE` | 用于中断当前 Turn 的 `emoji_type` |
+| `DSH_LARK_EVENT_STREAM_ENABLED` | `string` | `1` | `0` | 设为 `0` 时回退到轮询 `session.history` |
+| `DSH_LARK_ALLOW_SLASH_COMMANDS` | `string` | `0` | `1` | 允许以 `/` 开头的飞书消息执行 DSH 斜杠命令；默认关闭并转义 |
 
 例如，显式指定 Workspace：
 
@@ -215,10 +257,23 @@ export DSH_LARK_ALLOWED_SENDERS=ou_trusted_user_1,ou_trusted_user_2
 export DSH_LARK_BLOCKED_SENDERS=ou_revoked_user
 ```
 
-统一 Settings 页面中的“飞书桥接”卡片覆盖上表中的 `DSH_LARK_*` 运行配置（飞书 App
-凭证仍只从启动环境读取）。环境变量构成 DSH Settings 的基础层，Web 保存的用户层覆盖
-它；重置字段后会重新继承环境变量。出于与 DSH 配置面相同的安全约束，设置 API 仅在
-Host 绑定 `127.0.0.1` 时注册。
+统一 Settings 页面中的“飞书桥接”卡片覆盖上表中的 `DSH_LARK_*` 运行配置。环境变量构成
+DSH Settings 的基础层，Web 保存的用户层覆盖它；重置字段后会重新继承环境变量。出于与
+DSH 配置面相同的安全约束，设置 API 仅在 Host 绑定 `127.0.0.1` 时注册。
+
+**机器人凭证也可以在这里配置。** App Secret 存放在 harness 的凭证层
+（`ctx.credentials`，ref 为 `LARK_APP_SECRET`），设置界面只显示“是否已配置 / 来源 /
+是否可写”，永远不回显值。凭证层自身的优先级是：
+
+```
+进程环境变量（只读，最高）
+> $DSH_HOME/.credentials.yaml（可写）
+> <启动目录>/.env  >  $DSH_HOME/.env
+```
+
+所以 `LARK_APP_SECRET=… dsh web` 的行为与以前完全一致；此时界面上的密钥输入框会禁用
+并标注“由环境变量提供”，尝试保存会返回 409。轮换密钥后插件会自动重连，无需重启 DSH。
+App ID 不是密钥，作为普通设置项 `appId` 保存。
 
 插件按话题调度消息：同一话题的消息按顺序执行，不同话题在
 `DSH_LARK_MAX_CONCURRENT_TOPICS` 上限内并行。关闭插件时，正在运行的 Turn 会收到取消
@@ -264,8 +319,7 @@ dsh plugin --profile web update @open-aiden/dsh-lark-bridge \
 dsh plugin --profile web remove @open-aiden/dsh-lark-bridge
 ```
 
-卸载不会删除已有 DSH Session，也不会删除
-`$DSH_HOME/.agent-presets/dsh-lark-safe`。
+卸载不会删除已有 DSH Session。
 
 ## 常见问题
 
@@ -290,20 +344,9 @@ dsh plugin --profile web remove @open-aiden/dsh-lark-bridge
 
 ## 安全边界
 
-默认 preset 只注册以下工具：
-
-- `read`：读取 Workspace 内的 UTF-8 文本文件；
-- `glob`：在 Workspace 内查找文件；
-- `grep`：在 Workspace 内搜索内容。
-
-它不注册 Shell、文件写入、Skills、Jobs 或子代理。绝对路径和包含 `..` 的搜索
-路径会被拒绝；`.env`、凭证文件、私钥和 VCS 元数据也会被硬阻断。搜索 adapter 的
-canonical value 还会在 spill 产物生成前按实际返回路径再次过滤，避免 wildcard pattern
-绕过前置检查或把敏感结果写入 spill。
-`glob` 必须使用
-带 `/` 的锚定 pattern 或显式 path，`grep` 必须指定 path 或 include filter，以免
-无意遍历整个大型 Workspace。不要在日志中输出 App Secret，也不要把 DSH Web UI
-直接暴露到公网。
+插件不再安装或强制选择 Agent preset；飞书 Session 拥有的工具与权限完全继承 DSH
+当前默认 Agent 配置。请在 DSH 侧按部署需要配置权限，不要把 DSH Web UI 直接暴露到
+公网，也不要在日志中输出 App Secret。
 
 ## 开发
 
@@ -326,7 +369,7 @@ Pull Request 应保持改动聚焦，并附带与行为变化对应的测试。
 
 ## 项目状态
 
-本项目处于实验阶段，并与 `@deepseek-ai/dsh@0.1.0-rc.6` 对齐。飞书原生 COT 当前
+本项目处于实验阶段，并与 `@deepseek-ai/dsh@0.1.0-rc.7` 对齐。飞书原生 COT 当前
 使用 ByteDance 租户接口；其他租户无法使用 COT 时，普通文本回复仍可继续工作。
 
 ## License

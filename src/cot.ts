@@ -174,7 +174,6 @@ export class LarkCotGateway {
   async create(input: {
     chatId: string;
     sourceMessageId: string;
-    replyInThread?: boolean;
   }): Promise<CotMessage> {
     const created = assertSuccess(
       await this.client.request({
@@ -184,7 +183,6 @@ export class LarkCotGateway {
         data: {
           receive_id: input.chatId,
           origin_message_id: input.sourceMessageId,
-          ...(input.replyInThread ? { reply_in_thread: true } : {}),
         },
       }),
       "message_cot.create",
@@ -260,7 +258,8 @@ function cotEvent(
   return { eventType, content };
 }
 
-function toolPresentation(name: string): { title: string; icon: string } {
+/** Shared by the COT and card progress projections so labels stay identical. */
+export function toolPresentation(name: string): { title: string; icon: string } {
   if (name === "read") return { title: "读取文件", icon: "read" };
   if (name === "glob") return { title: "查找文件", icon: "search" };
   if (name === "grep") return { title: "搜索文件内容", icon: "search" };

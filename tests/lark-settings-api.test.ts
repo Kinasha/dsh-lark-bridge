@@ -6,6 +6,7 @@ import {
   type LarkSettingsApiPort,
   type LarkSettingsApiService,
 } from "../src/lark-settings-api.js";
+import { LarkCredentialWriteError } from "../src/lark-credentials.js";
 
 async function withSettingsServer(
   service: LarkSettingsApiService,
@@ -116,5 +117,141 @@ test("the settings API rejects malformed mutations before touching DSH", async (
     });
     assert.equal(response.status, 400);
     assert.equal(writes, 0);
+  });
+});
+
+test("routes credential operations and never echoes a value", async () => {
+  const writes: { ref: string; value: string }[] = [];
+  const removals: string[] = [];
+  const service: LarkSettingsApiService = {
+    describe: async () => ({
+      writable: true,
+      revision: 1,
+      value: { enabled: true },
+      credentials: {
+        LARK_APP_ID: { configured: true, writable: false, source: "env" },
+        LARK_APP_SECRET: { configured: false, writable: true },
+      },
+    }),
+    mutate: async () => undefined,
+    setCredential: async (ref, value) => {
+      writes.push({ ref, value });
+    },
+    unsetCredential: async (ref) => {
+      removals.push(ref);
+    },
+  };
+
+  await withSettingsServer(service, async (origin) => {
+    const described = await (await fetch(`${origin}/dsh-lark/settings/api`)).json();
+    assert.deepEqual((described as { credentials: unknown }).credentials, {
+      LARK_APP_ID: { configured: true, writable: false, source: "env" },
+      LARK_APP_SECRET: { configured: false, writable: true },
+    });
+    assert.doesNotMatch(JSON.stringify(described), /secret-value/i);
+
+    const written = await fetch(`${origin}/dsh-lark/settings/api`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        revision: 1,
+        ops: [{ op: "credential-set", ref: "LARK_APP_SECRET", value: " s3cret " }],
+      }),
+    });
+    assert.equal(written.status, 200);
+    assert.deepEqual(writes, [{ ref: "LARK_APP_SECRET", value: " s3cret " }]);
+
+    const cleared = await fetch(`${origin}/dsh-lark/settings/api`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        revision: 1,
+        ops: [{ op: "credential-unset", ref: "LARK_APP_SECRET" }],
+      }),
+    });
+    assert.equal(cleared.status, 200);
+    assert.deepEqual(removals, ["LARK_APP_SECRET"]);
+  });
+});
+
+test("rejects a credential ref outside this plugin's two", async () => {
+  const service: LarkSettingsApiService = {
+    describe: async () => ({ writable: true, revision: 1, value: {} }),
+    mutate: async () => undefined,
+    setCredential: async () => {
+      throw new Error("must not be called");
+    },
+  };
+  await withSettingsServer(service, async (origin) => {
+    const response = await fetch(`${origin}/dsh-lark/settings/api`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        revision: 1,
+        ops: [{ op: "credential-set", ref: "DEEPSEEK_API_KEY", value: "x" }],
+      }),
+    });
+    assert.equal(response.status, 400, "this route is not a general credential store");
+  });
+});
+
+test("reports a shadowed credential as a conflict, not a bad request", async () => {
+  const service: LarkSettingsApiService = {
+    describe: async () => ({ writable: true, revision: 1, value: {} }),
+    mutate: async () => undefined,
+    setCredential: async () => {
+      throw new LarkCredentialWriteError(
+        "LARK_APP_SECRET is supplied by env and cannot be changed here",
+        "LARK_APP_SECRET",
+        "read_only",
+      );
+    },
+  };
+  await withSettingsServer(service, async (origin) => {
+    const response = await fetch(`${origin}/dsh-lark/settings/api`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        revision: 1,
+        ops: [{ op: "credential-set", ref: "LARK_APP_SECRET", value: "x" }],
+      }),
+    });
+    assert.equal(response.status, 409);
+    const body = (await response.json()) as { reason: string; ref: string };
+    assert.equal(body.reason, "read_only");
+    assert.equal(body.ref, "LARK_APP_SECRET");
+  });
+});
+
+test("accepts every field the schema declares and nothing else", async () => {
+  const applied: unknown[] = [];
+  const service: LarkSettingsApiService = {
+    describe: async () => ({ writable: true, revision: 3, value: {} }),
+    mutate: async (ops) => {
+      applied.push(...ops);
+    },
+  };
+  await withSettingsServer(service, async (origin) => {
+    // A field added to the schema is writable without touching this route.
+    const ok = await fetch(`${origin}/dsh-lark/settings/api`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        revision: 3,
+        ops: [{ op: "set", path: ["replyMode"], value: "card" }],
+      }),
+    });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(applied, [{ op: "set", path: ["replyMode"], value: "card" }]);
+
+    const unknown = await fetch(`${origin}/dsh-lark/settings/api`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        revision: 3,
+        ops: [{ op: "set", path: ["notAField"], value: 1 }],
+      }),
+    });
+    assert.equal(unknown.status, 400);
   });
 });

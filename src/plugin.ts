@@ -1,139 +1,85 @@
-import path from "node:path";
 import type { Context } from "@deepseek-ai/cordis";
 import type {} from "@deepseek-ai/dsh-host-apiproxy";
 import type {} from "@deepseek-ai/dsh-host-webserver";
 import type { SettingsNamespace } from "@deepseek-ai/dsh-settings";
-import z from "@deepseek-ai/schemastery";
 import { ApiProxyDshClient } from "./api-proxy-client.js";
 import { runBridge } from "./bridge.js";
 import { ConsumerSupervisor } from "./consumer-supervisor.js";
 import {
-  defaultAdmissionStatePath,
   EventAdmissionStore,
   JsonFileAdmissionAdapter,
 } from "./event-admission.js";
+import { createLarkSdkApiClient, LarkSdkTransport } from "./lark.js";
 import {
-  createLarkSdkApiClient,
-  LarkSdkTransport,
+  describeLarkCredentials,
+  LARK_APP_ID_REF,
+  LARK_APP_SECRET_REF,
   resolveLarkCredentials,
-} from "./lark.js";
-import {
-  defaultLarkUserAuthStatePath,
-  JsonFileLarkUserAuthStore,
-  LarkUserAuth,
-} from "./lark-user-auth.js";
+  setLarkCredential,
+  unsetLarkCredential,
+  type CredentialProviderPort,
+  type LarkCredentialRef,
+} from "./lark-credentials.js";
+import { JsonFileLarkUserAuthStore, LarkUserAuth } from "./lark-user-auth.js";
 import { registerLarkUserAuthWeb } from "./lark-user-auth-web.js";
 import {
   registerLarkSettingsApi,
   type LarkSettingsDescriptor,
 } from "./lark-settings-api.js";
 import type { SemanticLogger } from "./logger.js";
-import { BUNDLED_PRESET_ID, ensureBundledPreset } from "./preset-installer.js";
+import {
+  Config,
+  normalizeConfig,
+  type NormalizedLarkConfig,
+} from "./lark-config.js";
+import {
+  MemoryLarkHtmlReportStore,
+  registerLarkHtmlReportWeb,
+} from "./lark-html-host.js";
+import { LarkCardKitGateway } from "./lark-cardkit.js";
+import { LarkReplyChannel } from "./lark-reply.js";
+import {
+  CardActionRegistry,
+  CardActionRouter,
+  type CardActionEffectsPort,
+} from "./lark-card-actions.js";
+import { LarkQuestionController } from "./lark-questions.js";
+import {
+  SessionEventStream,
+  type SessionEventSourcePort,
+} from "./session-event-stream.js";
 
 export const name = "@open-aiden/dsh-lark-bridge";
-export const inject = ["apiProxy", "webServer", "settings"];
+/**
+ * `credentials` is optional: a profile without the credential seam still loads
+ * and falls back to reading `LARK_APP_ID` / `LARK_APP_SECRET` from the process
+ * environment, which is what the standalone runtime does.
+ */
+export const inject = {
+  required: ["apiProxy", "webServer", "settings"],
+  optional: ["credentials"],
+};
 export const LARK_SETTINGS_NAMESPACE = "dsh-lark-bridge" as SettingsNamespace;
 
-export interface Config {
-  enabled?: boolean;
-  workspacePath?: string;
-  workspaceTitle?: string;
-  agentPreset?: string;
-  installBundledPreset?: boolean;
-  allowedSenderIds?: string[];
-  blockedSenderIds?: string[];
-  maxConcurrentTopics?: number;
-  maxPendingMessages?: number;
-  eventStatePath?: string;
-  eventRetentionMs?: number;
-  enableUserAuth?: boolean;
-  userAuthStatePath?: string;
-  userAuthRedirectUri?: string;
-}
+export { Config, normalizeConfig };
+export type { NormalizedLarkConfig };
 
-const SenderIdList = z.transform(z.any(), (value) =>
-  Array.isArray(value)
-    ? value.filter((senderId): senderId is string => typeof senderId === "string")
-    : [],
-);
-
-export const Config: z<Config> = z.object({
-  enabled: z.boolean().default(true).description("Enable the Lark bridge."),
-  workspacePath: z
-    .string()
-    .default(".")
-    .description("Workspace used by sessions created from Lark topics."),
-  workspaceTitle: z.string().description("Optional DSH workspace title."),
-  agentPreset: z
-    .string()
-    .default(BUNDLED_PRESET_ID)
-    .description("Agent preset assigned to new Lark topic sessions."),
-  installBundledPreset: z
-    .boolean()
-    .default(true)
-    .description("Install the bundled read-only preset at startup."),
-  allowedSenderIds: SenderIdList
-    .description("Sender open_ids allowed to use the bridge; empty allows all."),
-  blockedSenderIds: SenderIdList
-    .description("Sender open_ids rejected before the allowlist is checked."),
-  maxConcurrentTopics: z
-    .number()
-    .step(1)
-    .min(1)
-    .default(4)
-    .description("Maximum number of Lark topics processed concurrently."),
-  maxPendingMessages: z
-    .number()
-    .step(1)
-    .min(1)
-    .default(256)
-    .description("Maximum number of inbound messages kept pending."),
-  eventStatePath: z.string().description("Admission state file path."),
-  eventRetentionMs: z
-    .number()
-    .step(1)
-    .min(1)
-    .default(604_800_000)
-    .description("Duration to retain admission records, in milliseconds."),
-  enableUserAuth: z
-    .boolean()
-    .default(true)
-    .description("Enable OAuth for sending Web input as the Lark user."),
-  userAuthStatePath: z.string().description("OAuth token state file path."),
-  userAuthRedirectUri: z.string().description("Explicit OAuth redirect URI."),
-});
-
-function senderIds(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const normalized = [
-    ...new Set(
-      value
-        .filter((senderId): senderId is string => typeof senderId === "string")
-        .map((senderId) => senderId.trim())
-        .filter(Boolean),
-    ),
-  ];
-  return normalized.length === 0 ? undefined : normalized;
-}
-
-export function normalizeConfig(input: Config) {
-  return {
-    enabled: input.enabled ?? true,
-    workspacePath: path.resolve(input.workspacePath ?? "."),
-    workspaceTitle: input.workspaceTitle?.trim() || undefined,
-    agentPreset: input.agentPreset ?? BUNDLED_PRESET_ID,
-    installBundledPreset: input.installBundledPreset ?? true,
-    allowedSenderIds: senderIds(input.allowedSenderIds),
-    blockedSenderIds: senderIds(input.blockedSenderIds),
-    maxConcurrentTopics: input.maxConcurrentTopics ?? 4,
-    maxPendingMessages: input.maxPendingMessages ?? 256,
-    eventStatePath: input.eventStatePath?.trim() || defaultAdmissionStatePath(),
-    eventRetentionMs: input.eventRetentionMs ?? 604_800_000,
-    enableUserAuth: input.enableUserAuth ?? true,
-    userAuthStatePath:
-      input.userAuthStatePath?.trim() || defaultLarkUserAuthStatePath(),
-    userAuthRedirectUri: input.userAuthRedirectUri?.trim() || undefined,
-  };
+/**
+ * Resolves the credential seam opportunistically.
+ *
+ * `ctx.get(name)` rather than `ctx.credentials`: the context proxy throws
+ * `cannot get property "credentials" without inject`, and a loader entry's own
+ * `inject` list — the one in `dsh.bundle.patch.yml` — overrides this module's
+ * `inject` export, so the property access would break any profile whose entry
+ * predates the credential seam. `ctx.get` reads the store directly and answers
+ * `undefined` when nothing is composed, which is the same shape the helpers
+ * already handle by falling back to the process environment. This mirrors how
+ * `dsh-tools` consumes the approval seam.
+ */
+function credentialProvider(ctx: Context): CredentialProviderPort | undefined {
+  return (
+    ctx as unknown as { get(name: string): CredentialProviderPort | undefined }
+  ).get("credentials");
 }
 
 export async function apply(ctx: Context, input: Config): Promise<void> {
@@ -146,34 +92,48 @@ export async function apply(ctx: Context, input: Config): Promise<void> {
   if (ctx.webServer.host === "127.0.0.1") {
     ctx.effect(
       () =>
-        registerLarkSettingsApi(ctx.webServer, {
-          describe: async (): Promise<LarkSettingsDescriptor> => {
-            const descriptor = ctx.settings
-              .describe({ redactSecrets: true })
-              .find((candidate) => candidate.ns === LARK_SETTINGS_NAMESPACE);
-            if (descriptor === undefined) {
-              throw new Error("Lark settings namespace is not registered");
-            }
-            return {
-              writable: ctx.settings.writable,
-              revision: descriptor.revision,
-              value: descriptor.value as Config,
-              ...(descriptor.base === undefined
-                ? {}
-                : { base: descriptor.base as Partial<Config> }),
-              ...(descriptor.user === undefined
-                ? {}
-                : { user: descriptor.user as Partial<Config> }),
-            };
+        registerLarkSettingsApi(
+          ctx.webServer,
+          {
+            describe: async (): Promise<LarkSettingsDescriptor> => {
+              const descriptor = ctx.settings
+                .describe({ redactSecrets: true })
+                .find((candidate) => candidate.ns === LARK_SETTINGS_NAMESPACE);
+              if (descriptor === undefined) {
+                throw new Error("Lark settings namespace is not registered");
+              }
+              return {
+                writable: ctx.settings.writable,
+                revision: descriptor.revision,
+                value: descriptor.value as Config,
+                // The serialized schema lets the browser derive field types and
+                // roles instead of hardcoding a parallel table.
+                schema: descriptor.schema,
+                // Status only. `CredentialInfo` has no value field, so no secret
+                // can leak through this route by construction.
+                credentials: await describeLarkCredentials(credentialProvider(ctx)),
+                ...(descriptor.base === undefined
+                  ? {}
+                  : { base: descriptor.base as Partial<Config> }),
+                ...(descriptor.user === undefined
+                  ? {}
+                  : { user: descriptor.user as Partial<Config> }),
+              };
+            },
+            mutate: async (operations, revision) => {
+              await ctx.settings.mutate(
+                LARK_SETTINGS_NAMESPACE,
+                operations,
+                revision,
+              );
+            },
+            setCredential: (ref: LarkCredentialRef, value: string) =>
+              setLarkCredential(credentialProvider(ctx), ref, value),
+            unsetCredential: (ref: LarkCredentialRef) =>
+              unsetLarkCredential(credentialProvider(ctx), ref),
           },
-          mutate: async (operations, revision) => {
-            await ctx.settings.mutate(
-              LARK_SETTINGS_NAMESPACE,
-              operations,
-              revision,
-            );
-          },
-        }),
+          Config,
+        ),
       "dsh-lark settings web",
     );
   } else {
@@ -186,16 +146,28 @@ export async function apply(ctx: Context, input: Config): Promise<void> {
     logger.info("status=disabled");
     return;
   }
-  const credentials = resolveLarkCredentials();
-  if (config.installBundledPreset) {
-    const preset = await ensureBundledPreset();
-    logger.info(
-      "preset=%s status=%s",
-      BUNDLED_PRESET_ID,
-      preset.installed ? "installed" : "ready",
+  const provider = credentialProvider(ctx);
+  let credentials: Awaited<ReturnType<typeof resolveLarkCredentials>>;
+  try {
+    credentials = await resolveLarkCredentials({
+      provider,
+      settingsAppId: config.appId,
+    });
+  } catch (error) {
+    // Unconfigured is a normal first-run state, not a failure: throwing here
+    // would tear down this fiber's effects — including the settings route the
+    // user needs in order to enter the credentials in the first place.
+    logger.warn(
+      "status=unconfigured reason=%s",
+      error instanceof Error ? error.message : String(error),
     );
+    return;
   }
-
+  logger.info(
+    "credentials app_id_source=%s app_secret_source=%s",
+    credentials.sources.appId ?? "unset",
+    credentials.sources.appSecret ?? "unset",
+  );
   const semanticLogger: SemanticLogger = {
     info: (event, fields) =>
       logger.info("event=%s fields=%s", event, JSON.stringify(fields ?? {})),
@@ -204,7 +176,41 @@ export async function apply(ctx: Context, input: Config): Promise<void> {
     error: (event, fields) =>
       logger.error("event=%s fields=%s", event, JSON.stringify(fields ?? {})),
   };
-  const apiClient = createLarkSdkApiClient(credentials, semanticLogger);
+  const apiClient = createLarkSdkApiClient(
+    credentials,
+    semanticLogger,
+    config.domain,
+  );
+  const eventSource: SessionEventSourcePort = {
+    events: {
+      mux: (request, signal) =>
+        ctx.apiProxy.events.mux(request as never, signal) as never,
+    },
+    respond: (message) => ctx.apiProxy.respond(message as never),
+  };
+  const eventStream = new SessionEventStream(eventSource, {
+    logger: semanticLogger,
+  });
+  const cardActions = new CardActionRegistry();
+  const questions = new LarkQuestionController({
+    stream: eventStream,
+    registry: cardActions,
+  });
+  const unsupportedCardAction = async (): Promise<void> => {
+    throw new Error("card action is not enabled by this bridge");
+  };
+  const cardActionEffects: CardActionEffectsPort = {
+    stop: unsupportedCardAction,
+    retry: unsupportedCardAction,
+    newTopic: unsupportedCardAction,
+    approve: unsupportedCardAction,
+    answer: (input) => questions.answerOption(input),
+  };
+  const cardActionRouter = new CardActionRouter({
+    registry: cardActions,
+    effects: cardActionEffects,
+    logger: semanticLogger,
+  });
   const userAuthEnabled =
     config.enableUserAuth && ctx.webServer.host === "127.0.0.1";
   const userAuth = userAuthEnabled
@@ -227,6 +233,34 @@ export async function apply(ctx: Context, input: Config): Promise<void> {
       reason: "web_host_is_not_loopback",
     });
   }
+  const transport = new LarkSdkTransport({
+    credentials,
+    domain: config.domain,
+    apiClient,
+    ...(userAuth === undefined ? {} : { userAuth }),
+    logger: semanticLogger,
+    maxPendingMessages: config.maxPendingMessages,
+    ...(config.enableQuestions
+      ? { onCardAction: (raw: unknown) => cardActionRouter.handle(raw) }
+      : {}),
+  });
+
+  const reports =
+    config.enableHtmlReports && ctx.webServer.host === "127.0.0.1"
+      ? new MemoryLarkHtmlReportStore({ ttlMs: config.htmlReportTtlMs })
+      : undefined;
+  if (reports !== undefined) {
+    ctx.effect(
+      () => registerLarkHtmlReportWeb(ctx.webServer, reports),
+      "dsh-lark html reports",
+    );
+  } else if (config.enableHtmlReports) {
+    // On 0.0.0.0 the report URL would be LAN-reachable with no authentication.
+    semanticLogger.warn("lark_html_host_disabled", {
+      reason: "web_host_is_not_loopback",
+    });
+  }
+
   const admission = new EventAdmissionStore(
     new JsonFileAdmissionAdapter(config.eventStatePath),
     {
@@ -239,26 +273,62 @@ export async function apply(ctx: Context, input: Config): Promise<void> {
       retentionMs: config.eventRetentionMs,
     },
   );
+  // The card tier is opt-in for one release: `replyMode` defaults to "post".
+  const cardKitEnabled = config.replyMode === "card" && config.enableCardKit;
+  const replyChannel = new LarkReplyChannel({
+    transport: transport,
+    ...(cardKitEnabled
+      ? { cardkit: new LarkCardKitGateway(apiClient, { logger: semanticLogger }) }
+      : {}),
+    logger: semanticLogger,
+    ...(config.enableQuestions ? { buttons: questions } : {}),
+    config: {
+      enableCardKit: cardKitEnabled,
+      enableCot: config.enableCot,
+      alwaysPostFinal: config.alwaysPostFinal,
+      printFrequencyMs: config.streamPrintFrequencyMs,
+      printStep: config.streamPrintStep,
+      streamElementMaxChars: config.streamElementMaxChars,
+    },
+  });
+  logger.info(
+    "reply reply_mode=%s preferred_tier=%s html_reports=%s",
+    config.replyMode,
+    replyChannel.preferredTier,
+    reports === undefined ? "off" : "on",
+  );
+
   const supervisor = new ConsumerSupervisor({ logger: semanticLogger });
   let ready: Promise<void> | undefined;
 
   ctx.effect(() => {
+    const shutdown = new AbortController();
+    const running = eventStream.start(shutdown.signal);
+    void running.catch((error: unknown) => {
+      semanticLogger.error("session_event_stream_failed", {
+        errorName: error instanceof Error ? error.name : typeof error,
+      });
+    });
+    return async () => {
+      shutdown.abort(new Error("dsh-lark event stream stopped"));
+      await running.catch(() => undefined);
+    };
+  }, "dsh-lark session event stream");
+
+  ctx.effect(() => {
     ready = supervisor.start(async (signal, onReady) => {
       const handled = await runBridge({
-        client: new ApiProxyDshClient(ctx.apiProxy),
-        lark: new LarkSdkTransport({
-          credentials,
-          apiClient,
-          ...(userAuth === undefined ? {} : { userAuth }),
-          logger: semanticLogger,
-          maxPendingMessages: config.maxPendingMessages,
-        }),
+        client: new ApiProxyDshClient(ctx.apiProxy, eventStream),
+        lark: transport,
+        replyChannel,
+        allowSlashCommands: config.allowSlashCommands,
+        enableQuestions: config.enableQuestions,
+        ...(config.enableQuestions ? { questionAnswers: questions } : {}),
         signal,
         workspacePath: config.workspacePath,
         ...(config.workspaceTitle === undefined
           ? {}
           : { workspaceTitle: config.workspaceTitle }),
-        agentPreset: config.agentPreset,
         admission,
         maxConcurrentTopics: config.maxConcurrentTopics,
         maxPendingMessages: config.maxPendingMessages,
@@ -279,11 +349,26 @@ export async function apply(ctx: Context, input: Config): Promise<void> {
   if (ready === undefined) {
     throw new Error("dsh-lark consumer effect did not start");
   }
+
+  // The SDK client captures appId/appSecret at construction, so honouring the
+  // credential seam's "resolve per operation" contract means reconnecting.
+  ctx.effect(() => {
+    const dispose = ctx.on?.("credentials/updated", (ref: unknown) => {
+      if (ref !== LARK_APP_ID_REF && ref !== LARK_APP_SECRET_REF) return;
+      semanticLogger.info("lark_credentials_rotated", { ref: String(ref) });
+      void supervisor.restart().catch((error: unknown) => {
+        semanticLogger.error("lark_credentials_restart_failed", {
+          errorName: error instanceof Error ? error.name : typeof error,
+        });
+      });
+    });
+    return () => dispose?.();
+  }, "dsh-lark credential rotation");
+
   await ready;
   logger.info(
-    "status=ready workspace=%s preset=%s max_concurrent_topics=%d max_pending_messages=%d",
+    "status=ready workspace=%s max_concurrent_topics=%d max_pending_messages=%d",
     config.workspacePath,
-    config.agentPreset,
     config.maxConcurrentTopics,
     config.maxPendingMessages,
   );

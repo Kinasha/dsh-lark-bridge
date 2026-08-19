@@ -12,8 +12,14 @@ import {
   type SessionEvent,
   type WaitForTurnOptions,
   type WorkspaceView,
+  completedTurnAfter,
+  historySince,
   waitForCompletedTurn,
 } from "./dsh-client.js";
+import {
+  SessionEventStream,
+  waitForTurnFromStream,
+} from "./session-event-stream.js";
 
 function request<P>(payload: P): RpcRequest<P> {
   return { rpcId: randomUUID() as RpcId, payload };
@@ -30,7 +36,10 @@ async function unwrap<T>(response: Promise<RpcResponse<T>>): Promise<T> {
 }
 
 export class ApiProxyDshClient implements DshBridgeClient {
-  constructor(private readonly api: ApiProxy) {}
+  constructor(
+    private readonly api: ApiProxy,
+    private readonly eventStream?: SessionEventStream,
+  ) {}
 
   async listWorkspaces(): Promise<WorkspaceView[]> {
     const value = await unwrap(this.api.workspace.list(request({})));
@@ -76,24 +85,15 @@ export class ApiProxyDshClient implements DshBridgeClient {
   async ensureSession(
     sessionId: string,
     workspaceId: string,
-    agentPreset: string,
   ): Promise<EnsuredSession> {
     const listed = await unwrap(this.api.sessions.list(request({})));
     const existing = listed.items.find((item) => item.sessionId === sessionId);
-    if (existing !== undefined) {
-      if (existing.agentPreset !== agentPreset) {
-        throw new Error(
-          `session ${sessionId} already uses preset ${existing.agentPreset ?? "unknown"}`,
-        );
-      }
-      return { sessionId, created: false };
-    }
+    if (existing !== undefined) return { sessionId, created: false };
     const created = await unwrap(
       this.api.sessions.create(
         request({
           workspaceId: workspaceId as never,
           sessionId: sessionId as never,
-          agentPreset,
         }),
       ),
     );
@@ -150,6 +150,34 @@ export class ApiProxyDshClient implements DshBridgeClient {
     afterSeq: number,
     options: WaitForTurnOptions = {},
   ): Promise<CompletedTurn> {
+    if (this.eventStream !== undefined) {
+      return waitForTurnFromStream({
+        stream: this.eventStream,
+        history: (id, checkpoint, signal) =>
+          historySince(
+            (session, maxMessages, beforeSeq) =>
+              this.history(session, maxMessages, beforeSeq),
+            id,
+            checkpoint,
+            signal,
+          ),
+        completedTurnAfter,
+        sessionId,
+        afterSeq,
+        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+        ...(options.onEvents === undefined ? {} : { onEvents: options.onEvents }),
+        ...(options.onApproval === undefined
+          ? {}
+          : { onApproval: options.onApproval }),
+        ...(options.onQuestion === undefined
+          ? {}
+          : { onQuestion: options.onQuestion }),
+        ...(options.onResolved === undefined
+          ? {}
+          : { onResolved: options.onResolved }),
+      });
+    }
     return waitForCompletedTurn(
       (id, maxMessages, beforeSeq) => this.history(id, maxMessages, beforeSeq),
       sessionId,

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import type { MuxEvent } from "./session-event-stream.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -35,7 +36,6 @@ export interface SessionSummary {
   running: boolean;
   blank: boolean;
   cwd?: string;
-  agentPreset?: string;
 }
 
 export interface SessionEvent {
@@ -70,6 +70,18 @@ export interface WaitForTurnOptions {
   pollMs?: number;
   signal?: AbortSignal;
   onEvents?(events: SessionEvent[]): void | Promise<void>;
+  onApproval?(
+    event: Extract<MuxEvent, { type: "approval/requested" }>,
+  ): void | Promise<void>;
+  onQuestion?(
+    event: Extract<MuxEvent, { type: "question/requested" }>,
+  ): void | Promise<void>;
+  onResolved?(
+    event: Extract<
+      MuxEvent,
+      { type: "approval/resolved" | "question/resolved" }
+    >,
+  ): void | Promise<void>;
 }
 
 export interface DshBridgeClient {
@@ -77,7 +89,6 @@ export interface DshBridgeClient {
   ensureSession(
     sessionId: string,
     workspaceId: string,
-    agentPreset: string,
   ): Promise<EnsuredSession>;
   history(
     sessionId: string,
@@ -344,23 +355,14 @@ export class DshClient implements DshBridgeClient {
   async ensureSession(
     sessionId: string,
     workspaceId: string,
-    agentPreset: string,
   ): Promise<EnsuredSession> {
     const existing = (await this.listSessions()).find(
       (session) => session.sessionId === sessionId,
     );
-    if (existing !== undefined) {
-      if (existing.agentPreset !== agentPreset) {
-        throw new Error(
-          `session ${sessionId} already uses preset ${existing.agentPreset ?? "unknown"}`,
-        );
-      }
-      return { sessionId, created: false };
-    }
+    if (existing !== undefined) return { sessionId, created: false };
     const created = await this.call<{ sessionId: string }>("session.create", {
       workspaceId,
       sessionId,
-      agentPreset,
     });
     return { sessionId: created.sessionId, created: true };
   }

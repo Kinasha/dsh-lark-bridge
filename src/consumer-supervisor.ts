@@ -45,7 +45,7 @@ function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
 }
 
 export class ConsumerSupervisor {
-  private readonly controller = new AbortController();
+  private controller = new AbortController();
   private readonly retryDelayMs: number;
   private readonly maxRetryDelayMs: number;
   private readonly stableResetMs: number;
@@ -56,6 +56,7 @@ export class ConsumerSupervisor {
   private attempts = 0;
   private lastErrorName: string | undefined;
   private loop: Promise<void> | undefined;
+  private run: ConsumerRun | undefined;
 
   constructor(options: ConsumerSupervisorOptions = {}) {
     this.retryDelayMs = options.retryDelayMs ?? 1_000;
@@ -82,6 +83,10 @@ export class ConsumerSupervisor {
     if (this.loop !== undefined) {
       throw new Error("consumer supervisor is already running");
     }
+    // A fresh controller per start is what makes `restart()` possible: the
+    // previous one stays aborted forever once `stop()` used it.
+    this.controller = new AbortController();
+    this.run = run;
     let resolveReady!: () => void;
     let rejectReady!: (error: unknown) => void;
     const ready = new Promise<void>((resolve, reject) => {
@@ -115,7 +120,23 @@ export class ConsumerSupervisor {
     if (this.state !== "failed") this.transition("draining");
     this.controller.abort(new Error("consumer supervisor stopped"));
     await this.loop?.catch(() => undefined);
+    this.loop = undefined;
     this.transition("stopped");
+  }
+
+  /**
+   * Stops and starts the same run. Used when a rotated credential invalidates
+   * the long connection: the SDK client captures `appId`/`appSecret` at
+   * construction, so the only way a new secret takes effect is a reconnect.
+   */
+  async restart(): Promise<void> {
+    const run = this.run;
+    if (run === undefined) {
+      throw new Error("consumer supervisor has not been started");
+    }
+    await this.stop();
+    this.attempts = 0;
+    await this.start(run);
   }
 
   private async runLoop(

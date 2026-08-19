@@ -94,7 +94,7 @@ async function doctor(baseUrl: string): Promise<void> {
     JSON.stringify(
       {
         node: process.version,
-        dsh: "0.1.0-rc.6",
+        dsh: "0.1.0-rc.7",
         dshUrl: baseUrl,
         dshHost: host ?? "not_running",
         larkBot: "ready",
@@ -102,7 +102,6 @@ async function doctor(baseUrl: string): Promise<void> {
         larkAppId: "present",
         larkAppSecret: "present",
         deepseekApiKey: process.env.DEEPSEEK_API_KEY ? "present" : "missing",
-        preset: "lark-safe",
       },
       null,
       2,

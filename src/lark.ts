@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   Client,
+  Domain,
   EventDispatcher,
   LoggerLevel,
   WSClient,
@@ -13,6 +14,8 @@ import {
 import { LarkCotGateway, type CotMessage } from "./cot.js";
 import { renderLarkMarkdown } from "./lark-markdown.js";
 import type { LarkOAuthTokenApi } from "./lark-user-auth.js";
+import type { CardKitApiClientPort } from "./lark-cardkit.js";
+import type { LarkResourceDescriptor } from "./lark-resources.js";
 import { silentLogger, type SemanticLogger } from "./logger.js";
 
 const DEFAULT_READINESS_TIMEOUT_MS = 30_000;
@@ -34,6 +37,12 @@ export interface LarkMessage {
   senderId: string;
   messageType: string;
   content: string;
+  /**
+   * Attachments the SDK's `normalize()` surfaced. Optional so the literal
+   * `LarkMessage` values in the existing tests keep typechecking under
+   * `exactOptionalPropertyTypes`.
+   */
+  resources?: readonly LarkResourceDescriptor[];
 }
 
 export interface LarkReplyRoute {
@@ -118,7 +127,13 @@ export interface LarkApiClientPort {
   };
 }
 
-export interface LarkSdkApiClientPort extends LarkApiClientPort {
+/**
+ * The real SDK `Client`, which also carries the CardKit surface. Kept separate
+ * from `LarkApiClientPort` so test fakes only implement the messaging subset.
+ */
+export interface LarkSdkApiClientPort
+  extends LarkApiClientPort,
+    CardKitApiClientPort {
   accessToken: LarkOAuthTokenApi;
 }
 
@@ -138,12 +153,19 @@ export interface LarkMessageTransport {
   createCot(input: {
     chatId: string;
     sourceMessageId: string;
-    replyInThread?: boolean;
   }): Promise<CotMessage>;
+  /** Sends an `interactive` message carrying a CardKit card entity. */
+  replyWithCard?(input: {
+    route: LarkReplyRoute;
+    content: string;
+    uuid: string;
+    replyInThread: boolean;
+  }): Promise<LarkReplyResult>;
 }
 
 export interface LarkSdkTransportOptions {
   credentials: LarkCredentials;
+  domain?: "feishu" | "lark";
   logger?: LarkTransportLogger;
   wsClient?: LarkWsClientPort;
   apiClient?: LarkApiClientPort;
@@ -151,6 +173,8 @@ export interface LarkSdkTransportOptions {
   readinessTimeoutMs?: number;
   readinessPollIntervalMs?: number;
   maxPendingMessages?: number;
+  /** Handles `card.action.trigger` on the same WebSocket dispatcher. */
+  onCardAction?: (raw: unknown) => unknown | Promise<unknown>;
 }
 
 export interface LarkUserAccessTokenProvider {
@@ -198,24 +222,28 @@ function createLarkSdkLogger(logger: LarkTransportLogger): LarkSdkLogger {
 export function createLarkSdkApiClient(
   credentials: LarkCredentials,
   logger: LarkTransportLogger,
+  domain: "feishu" | "lark" = "feishu",
 ): LarkSdkApiClientPort {
   return new Client({
     appId: credentials.appId,
     appSecret: credentials.appSecret,
     logger: createLarkSdkLogger(logger),
     loggerLevel: LoggerLevel.warn,
+    domain: domain === "lark" ? Domain.Lark : Domain.Feishu,
   });
 }
 
 function createWsClient(
   credentials: LarkCredentials,
   logger: LarkTransportLogger,
+  domain: "feishu" | "lark" = "feishu",
 ): LarkWsClientPort {
   return new WSClient({
     appId: credentials.appId,
     appSecret: credentials.appSecret,
     logger: createLarkSdkLogger(logger),
     loggerLevel: LoggerLevel.warn,
+    domain: domain === "lark" ? Domain.Lark : Domain.Feishu,
     autoReconnect: true,
     onReconnecting: () => logger.warn("lark_consumer.reconnecting"),
     onReconnected: () => logger.info("lark_consumer.reconnected"),
@@ -293,6 +321,12 @@ export async function normalizeLarkMessageEnvelope(
   }
   const rootMessageId = nonBlank(message.rootId);
   const threadId = nonBlank(message.threadId);
+  const resources = Array.isArray(message.resources)
+    ? message.resources.filter(
+        (resource): resource is LarkResourceDescriptor =>
+          typeof resource?.fileKey === "string" && resource.fileKey.trim() !== "",
+      )
+    : [];
   return {
     eventId,
     messageId: message.messageId,
@@ -304,6 +338,7 @@ export async function normalizeLarkMessageEnvelope(
     senderId: message.senderId,
     messageType: message.rawContentType,
     content: message.content.trim(),
+    ...(resources.length === 0 ? {} : { resources }),
   };
 }
 
@@ -339,7 +374,7 @@ function messageReplyInput(route: LarkReplyRoute, markdown: string) {
 
 function replyResult(
   response: LarkMessageResponse,
-  identity: "message" | "user message",
+  identity: "message" | "user message" | "card message",
 ): LarkReplyResult {
   if (response.code !== undefined && response.code !== 0) {
     throw new Error(
@@ -388,10 +423,11 @@ export class LarkSdkTransport implements LarkMessageTransport {
   constructor(options: LarkSdkTransportOptions) {
     this.logger = options.logger ?? silentLogger;
     this.apiClient =
-      options.apiClient ?? createLarkSdkApiClient(options.credentials, this.logger);
+      options.apiClient ??
+      createLarkSdkApiClient(options.credentials, this.logger, options.domain);
     this.userAuth = options.userAuth;
     this.wsClient =
-      options.wsClient ?? createWsClient(options.credentials, this.logger);
+      options.wsClient ?? createWsClient(options.credentials, this.logger, options.domain);
     this.readinessTimeoutMs =
       options.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
     this.readinessPollIntervalMs =
@@ -407,9 +443,15 @@ export class LarkSdkTransport implements LarkMessageTransport {
     this.eventDispatcher = new EventDispatcher({
       logger: sdkLogger,
       loggerLevel: LoggerLevel.warn,
-    }).register({
-      "im.message.receive_v1": (raw: unknown) => this.enqueue(raw),
-    });
+    })
+      .register({
+        "im.message.receive_v1": (raw: unknown) => this.enqueue(raw),
+      })
+      .register(
+        options.onCardAction === undefined
+          ? {}
+          : { "card.action.trigger": options.onCardAction },
+      );
   }
 
   async consume(options: {
@@ -463,6 +505,30 @@ export class LarkSdkTransport implements LarkMessageTransport {
       messageReplyInput(route, await this.renderReplyMarkdown(text)),
     );
     return replyResult(response, "message");
+  }
+
+  /**
+   * Sends a card entity. Deliberately does not reuse `messageReplyInput`: that
+   * builder owns the `post` fallback payload asserted byte for byte in tests,
+   * and a card needs a different msg_type, a card-derived uuid, and a caller
+   * controlled `reply_in_thread`.
+   */
+  async replyWithCard(input: {
+    route: LarkReplyRoute;
+    content: string;
+    uuid: string;
+    replyInThread: boolean;
+  }): Promise<LarkReplyResult> {
+    const response = await this.apiClient.im.message.reply({
+      path: { message_id: input.route.topicRootMessageId },
+      data: {
+        msg_type: "interactive",
+        content: input.content,
+        uuid: input.uuid,
+        reply_in_thread: input.replyInThread,
+      },
+    });
+    return replyResult(response, "card message");
   }
 
   async replyToMessageAsUser(
@@ -520,7 +586,6 @@ export class LarkSdkTransport implements LarkMessageTransport {
   createCot(input: {
     chatId: string;
     sourceMessageId: string;
-    replyInThread?: boolean;
   }): Promise<CotMessage> {
     return new LarkCotGateway(this.apiClient).create(input);
   }

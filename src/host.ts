@@ -1,13 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { access, copyFile, mkdir } from "node:fs/promises";
+import { access, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { DshClient } from "./dsh-client.js";
 import {
   DEFAULT_DSH_PORT,
   DSH_HOME,
-  PRESET_PLUGIN_BUILD,
-  PRESET_SOURCE,
-  PRESET_TARGET,
   PROJECT_ROOT,
   WORKSPACE_PATH,
 } from "./config.js";
@@ -15,22 +12,7 @@ import {
 const DSH_BINARY = path.join(PROJECT_ROOT, "node_modules", ".bin", "dsh");
 
 export async function prepareDshHome(): Promise<void> {
-  await mkdir(PRESET_TARGET, { recursive: true });
   await mkdir(WORKSPACE_PATH, { recursive: true });
-  const presetFiles: Array<readonly [string, string]> = [
-      [
-        path.join(PRESET_SOURCE, "agent.cordis.yml"),
-        path.join(PRESET_TARGET, "agent.cordis.yml"),
-      ],
-      [
-        path.join(PRESET_SOURCE, "preset.yml"),
-        path.join(PRESET_TARGET, "preset.yml"),
-      ],
-      [PRESET_PLUGIN_BUILD, path.join(PRESET_TARGET, "read-only-files.js")],
-    ];
-  await Promise.all(
-    presetFiles.map(([source, target]) => copyFile(source, target)),
-  );
 }
 
 export async function assertDshInstalled(): Promise<void> {

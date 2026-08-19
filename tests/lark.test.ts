@@ -457,6 +457,57 @@ test("adds and removes the exact source-message reaction", async () => {
   ]);
 });
 
+test("card.action.trigger is handled on the same WebSocket dispatcher", async () => {
+  const callbacks: unknown[] = [];
+  const transport = new LarkSdkTransport({
+    credentials: { appId: "cli_test", appSecret: "secret" },
+    wsClient: {
+      start: async () => undefined,
+      close: () => undefined,
+      getConnectionStatus: () => ({ state: "connected" }),
+    },
+    apiClient: fakeApiClient(),
+    onCardAction: (raw) => {
+      callbacks.push(raw);
+      return { toast: { type: "success", content: "已回答" } };
+    },
+  });
+  const event = {
+    schema: "2.0",
+    header: { event_type: "card.action.trigger" },
+    event: {
+      operator: { open_id: "ou_owner" },
+      action: { tag: "button", value: { v: 1, a: "answer" } },
+      context: { open_message_id: "om_card", open_chat_id: "oc_chat" },
+    },
+  };
+
+  const response = await transport.eventDispatcher.invoke(event, {
+    needCheck: false,
+  });
+
+  assert.deepEqual(response, {
+    toast: { type: "success", content: "已回答" },
+  });
+  const received = callbacks[0] as Record<string, unknown>;
+  assert.deepEqual(
+    {
+      schema: received.schema,
+      event_type: received.event_type,
+      operator: received.operator,
+      action: received.action,
+      context: received.context,
+    },
+    {
+      schema: "2.0",
+      event_type: "card.action.trigger",
+      operator: { open_id: "ou_owner" },
+      action: { tag: "button", value: { v: 1, a: "answer" } },
+      context: { open_message_id: "om_card", open_chat_id: "oc_chat" },
+    },
+  );
+});
+
 test("transport dispatches independent inbound messages concurrently and drains them", async () => {
   const wsClient: LarkWsClientPort = {
     start: async () => undefined,

@@ -4,11 +4,11 @@ import type {
   DshBridgeClient,
   SessionEvent,
 } from "./dsh-client.js";
+import type { MuxEvent } from "./session-event-stream.js";
 
 export interface DshTopicTurnInput {
   sessionId: string;
   workspaceId: string;
-  agentPreset: string;
   title: string;
   text: string;
   checkpoint?: PromptCheckpoint;
@@ -16,6 +16,15 @@ export interface DshTopicTurnInput {
   onPromptRequest?(rpcId: string): void;
   onPrompted?(checkpoint: PromptCheckpoint): void | Promise<void>;
   onEvents?(events: SessionEvent[]): void | Promise<void>;
+  onQuestion?(
+    event: Extract<MuxEvent, { type: "question/requested" }>,
+  ): void | Promise<void>;
+  onResolved?(
+    event: Extract<
+      MuxEvent,
+      { type: "approval/resolved" | "question/resolved" }
+    >,
+  ): void | Promise<void>;
 }
 
 export class DshTopicTurn {
@@ -34,7 +43,6 @@ export class DshTopicTurn {
       const session = await this.client.ensureSession(
         input.sessionId,
         input.workspaceId,
-        input.agentPreset,
       );
       input.signal?.throwIfAborted();
       created = session.created;
@@ -55,6 +63,12 @@ export class DshTopicTurn {
       {
         ...(input.signal === undefined ? {} : { signal: input.signal }),
         ...(input.onEvents === undefined ? {} : { onEvents: input.onEvents }),
+        ...(input.onQuestion === undefined
+          ? {}
+          : { onQuestion: input.onQuestion }),
+        ...(input.onResolved === undefined
+          ? {}
+          : { onResolved: input.onResolved }),
       },
     );
     if (created) {

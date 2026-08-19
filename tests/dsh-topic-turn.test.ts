@@ -8,6 +8,7 @@ import type {
   WaitForTurnOptions,
   WorkspaceView,
 } from "../src/dsh-client.js";
+import type { MuxEvent } from "../src/session-event-stream.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -61,6 +62,23 @@ class FakeDshClient implements DshBridgeClient {
   ): Promise<CompletedTurn> {
     this.calls.push(`wait:${sessionId}:${afterSeq}`);
     this.waitOptions = options;
+    const question: Extract<MuxEvent, { type: "question/requested" }> = {
+      type: "question/requested",
+      rpcId: "question-rpc-1",
+      sessionId,
+      questions: [
+        {
+          id: "confirm",
+          question: "继续吗？",
+          options: [{ label: "继续" }, { label: "取消" }],
+        },
+      ],
+    };
+    void (
+      options as WaitForTurnOptions & {
+        onQuestion?: (event: typeof question) => void;
+      }
+    )?.onQuestion?.(question);
     return Promise.resolve({
       finalResponse: "answer",
       finishReason: "completed",
@@ -79,7 +97,6 @@ test("DSH topic turn hides provisioning, prompt, wait, and rename ordering", asy
     await turn.execute({
       sessionId: "session-1",
       workspaceId: "workspace-1",
-      agentPreset: "safe",
       title: "Feishu topic",
       text: "question",
       onPromptRequest: (rpcId) => {
@@ -102,6 +119,38 @@ test("DSH topic turn hides provisioning, prompt, wait, and rename ordering", asy
   ]);
 });
 
+test("DSH topic turn forwards AskUserQuestion requests to the reply surface", async () => {
+  const client = new FakeDshClient();
+  const questions: Extract<MuxEvent, { type: "question/requested" }>[] = [];
+
+  await new DshTopicTurn(client).execute({
+    sessionId: "session-1",
+    workspaceId: "workspace-1",
+    title: "topic",
+    text: "question",
+    onQuestion: (event: Extract<MuxEvent, { type: "question/requested" }>) => {
+      questions.push(event);
+    },
+  } as Parameters<DshTopicTurn["execute"]>[0] & {
+    onQuestion: (event: Extract<MuxEvent, { type: "question/requested" }>) => void;
+  });
+
+  assert.deepEqual(questions, [
+    {
+      type: "question/requested",
+      rpcId: "question-rpc-1",
+      sessionId: "session-1",
+      questions: [
+        {
+          id: "confirm",
+          question: "继续吗？",
+          options: [{ label: "继续" }, { label: "取消" }],
+        },
+      ],
+    },
+  ]);
+});
+
 test("DSH topic turn resumes from a checkpoint without prompting twice", async () => {
   const client = new FakeDshClient();
   const turn = new DshTopicTurn(client);
@@ -109,7 +158,6 @@ test("DSH topic turn resumes from a checkpoint without prompting twice", async (
   await turn.execute({
     sessionId: "session-1",
     workspaceId: "workspace-1",
-    agentPreset: "safe",
     title: "ignored",
     text: "question",
     checkpoint: { sessionId: "session-1", beforeSeq: 12 },
@@ -126,7 +174,6 @@ test("DSH topic turn forwards cancellation to progress polling", async () => {
   await turn.execute({
     sessionId: "session-1",
     workspaceId: "workspace-1",
-    agentPreset: "safe",
     title: "topic",
     text: "question",
     signal: controller.signal,
@@ -146,7 +193,6 @@ test("DSH topic turn does not prompt when shutdown happens during provisioning",
   const executing = new DshTopicTurn(client).execute({
     sessionId: "session-1",
     workspaceId: "workspace-1",
-    agentPreset: "safe",
     title: "topic",
     text: "question",
     signal: controller.signal,

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { runBridge } from "../src/bridge.js";
+import { runBridge, guardSlashCommand } from "../src/bridge.js";
 import type {
   WaitForTurnOptions,
   CompletedTurn,
@@ -9,6 +9,7 @@ import type {
   SessionEvent,
   WorkspaceView,
 } from "../src/dsh-client.js";
+import { sessionIdForTopic } from "../src/dsh-client.js";
 import type { CotEvent, CotWriterPort } from "../src/cot.js";
 import type {
   LarkMessage,
@@ -149,11 +150,8 @@ class FakeLarkTransport implements LarkMessageTransport {
   createCot(input: {
     chatId: string;
     sourceMessageId: string;
-    replyInThread?: boolean;
   }): Promise<{ cotId: string; messageId: string; writer: CotWriterPort }> {
-    this.operations.push(
-      `cot:create:${input.chatId}:${input.sourceMessageId}:${input.replyInThread ?? false}`,
-    );
+    this.operations.push(`cot:create:${input.chatId}:${input.sourceMessageId}`);
     return Promise.resolve({
       cotId: "cot-1",
       messageId: "cot-message-1",
@@ -212,12 +210,12 @@ test("a Feishu topic reuses one DSH session and replies to its root", async () =
   ]);
   assert.deepEqual(lark.operations, [
     "reaction:add:root-message:Get",
-    "cot:create:chat-1:root-message:true",
+    "cot:create:chat-1:root-message",
     "reaction:remove:root-message:reaction-root-message",
     "cot:complete:done",
     "reply:root-message",
     "reaction:add:follow-up:Get",
-    "cot:create:chat-1:follow-up:false",
+    "cot:create:chat-1:follow-up",
     "reaction:remove:follow-up:reaction-follow-up",
     "cot:complete:done",
     "reply:follow-up",
@@ -409,7 +407,7 @@ test("messages sent from Web show progress in the linked Feishu topic", async ()
       topicRootMessageId: "root-message",
     },
   ]);
-  assert.ok(lark.operations.includes("cot:create:chat-1:reply-2:false"));
+  assert.ok(lark.operations.includes("cot:create:chat-1:reply-2"));
   assert.deepEqual(
     lark.cotEvents.slice(-9).map((event) => event.eventType),
     [
@@ -487,5 +485,61 @@ test("a failed user-identity send falls back to a quoted bot reply", async () =>
     "answer",
     "**【来自用户在 Web 上的输入】**\n\n> first line\n> second line",
     "web answer",
+  ]);
+});
+
+test("a leading slash is escaped so Feishu text cannot run a DSH command", () => {
+  // DSH executes a prompt of exactly one text block starting with "/" as a
+  // slash command, bypassing the model entirely.
+  assert.equal(guardSlashCommand("/compact", false), "\\/compact");
+  assert.equal(guardSlashCommand("  /compact", false), "  \\/compact");
+  assert.equal(guardSlashCommand("/compact", true), "/compact");
+  assert.equal(guardSlashCommand("hello /compact", false), "hello /compact");
+  assert.equal(guardSlashCommand("", false), "");
+  assert.equal(guardSlashCommand("你好", false), "你好");
+});
+
+test("a pending free-text AskUserQuestion reply is not submitted as a new prompt", async () => {
+  const client = new FakeDshClient();
+  const lark = new FakeLarkTransport([
+    {
+      eventId: "event-question-answer",
+      messageId: "om_answer",
+      rootMessageId: "om_root",
+      threadId: "thread-1",
+      chatId: "chat-1",
+      chatType: "p2p",
+      senderId: "user-1",
+      messageType: "text",
+      content: "这是我的补充说明",
+    },
+  ]);
+  const answers: unknown[] = [];
+
+  assert.equal(
+    await runBridge({
+      client,
+      lark,
+      workspacePath: "/project",
+      enableQuestions: true,
+      questionAnswers: {
+        answerText: async (input) => {
+          answers.push(input);
+          return true;
+        },
+      },
+    }),
+    0,
+  );
+
+  assert.equal(client.sessionIds.length, 0, "no DSH turn was created");
+  assert.deepEqual(lark.replies, []);
+  assert.deepEqual(answers, [
+    {
+      eventId: "event-question-answer",
+      sessionId: sessionIdForTopic("chat-1", "om_root"),
+      senderOpenId: "user-1",
+      text: "这是我的补充说明",
+    },
   ]);
 });
