@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ApiProxy } from "@deepseek-ai/dsh-host-apiproxy/api";
 import { ApiProxyDshClient } from "../src/api-proxy-client.js";
+import { CardStepsProjection } from "../src/lark-card-stream.js";
 
 function success<T>(value: T) {
   return Promise.resolve({ result: { ok: true as const, value } });
@@ -122,6 +123,39 @@ test("history normalizes the host-computed tool presentation view", async () => 
       },
     },
   ]);
+});
+
+test("history discards an event-nested view that bypasses the API contract", async () => {
+  const api = {
+    sessions: {
+      history: () =>
+        success({
+          events: [
+            {
+              event: {
+                type: "tool/call",
+                seq: 8,
+                time: 21,
+                data: { callId: "call-1", name: "read" },
+                view: {
+                  for: "call",
+                  view: {
+                    card: "generic",
+                    title: "SECRET_TITLE",
+                    locations: "not-an-array",
+                  },
+                },
+              },
+            },
+          ],
+        }),
+    },
+  } as unknown as ApiProxy;
+
+  const events = await new ApiProxyDshClient(api).history("session-1");
+  assert.equal(events[0]?.view, undefined);
+  const text = new CardStepsProjection({ toolDetailMode: "detailed" }).present(events);
+  assert.doesNotMatch(text, /SECRET/);
 });
 
 test("API proxy session creation inherits the DSH default agent composition", async () => {

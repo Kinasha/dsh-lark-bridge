@@ -116,9 +116,13 @@ export class ApiProxyDshClient implements DshBridgeClient {
       ),
     );
     return value.events.map((entry) => {
+      const event = entry.event as SessionEvent;
       const view = normalizeToolEventView(entry.view);
       return {
-        ...(entry.event as SessionEvent),
+        type: event.type,
+        seq: event.seq,
+        time: event.time,
+        data: event.data,
         ...(view === undefined ? {} : { view }),
       };
     });
