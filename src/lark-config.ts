@@ -22,6 +22,9 @@ import { defaultLarkUserAuthStatePath } from "./lark-user-auth.js";
 
 export type LarkDomain = "feishu" | "lark";
 export type LarkReplyMode = "post" | "card";
+export type ToolDetailMode = "hidden" | "compact" | "standard" | "detailed";
+export type ProgressStyle = "timeline" | "list" | "plain";
+export type ThinkingIcon = "brain" | "sparkles" | "robot" | "none";
 
 export interface Config {
   enabled?: boolean;
@@ -46,6 +49,11 @@ export interface Config {
   streamPrintFrequencyMs?: number;
   streamPrintStep?: number;
   streamElementMaxChars?: number;
+  toolDetailMode?: ToolDetailMode;
+  progressStyle?: ProgressStyle;
+  thinkingIcon?: ThinkingIcon;
+  maxProgressItems?: number;
+  collapseProgressOnFinish?: boolean;
   enableHtmlReports?: boolean;
   htmlReportOrigin?: string;
   htmlReportTtlMs?: number;
@@ -153,6 +161,28 @@ export const Config: z<Config> = z.object({
     .min(1_000)
     .default(30_000)
     .description("Characters per card component before rolling over."),
+  toolDetailMode: z
+    .union(["hidden", "compact", "standard", "detailed"] as const)
+    .default("standard")
+    .description("Amount of safe tool information shown in card progress."),
+  progressStyle: z
+    .union(["timeline", "list", "plain"] as const)
+    .default("timeline")
+    .description("Visual style used by the card progress panel."),
+  thinkingIcon: z
+    .union(["brain", "sparkles", "robot", "none"] as const)
+    .default("brain")
+    .description("Icon used for reasoning steps in card progress."),
+  maxProgressItems: z
+    .number()
+    .step(1)
+    .min(1)
+    .default(100)
+    .description("Maximum progress entries retained in one card."),
+  collapseProgressOnFinish: z
+    .boolean()
+    .default(true)
+    .description("Collapse the progress panel when a turn finishes."),
   enableHtmlReports: z
     .boolean()
     .default(true)
@@ -263,6 +293,11 @@ export function normalizeConfig(input: Config) {
     streamPrintFrequencyMs: input.streamPrintFrequencyMs ?? 70,
     streamPrintStep: input.streamPrintStep ?? 1,
     streamElementMaxChars: input.streamElementMaxChars ?? 30_000,
+    toolDetailMode: input.toolDetailMode ?? "standard",
+    progressStyle: input.progressStyle ?? "timeline",
+    thinkingIcon: input.thinkingIcon ?? "brain",
+    maxProgressItems: input.maxProgressItems ?? 100,
+    collapseProgressOnFinish: input.collapseProgressOnFinish ?? true,
     enableHtmlReports: input.enableHtmlReports ?? true,
     htmlReportOrigin: input.htmlReportOrigin?.trim() || undefined,
     htmlReportTtlMs: input.htmlReportTtlMs ?? 86_400_000,
@@ -293,5 +328,20 @@ export function replyModePolicy(
   return {
     enableCardKit: streamingEnabled && config.enableCardKit,
     enableCot: streamingEnabled && config.enableCot,
+  };
+}
+
+/** Features whose callbacks only exist on the mux event stream. */
+export function runtimeFeaturePolicy(
+  config: Pick<
+    NormalizedLarkConfig,
+    "useEventStream" | "enableQuestions" | "enableCardActions"
+  >,
+) {
+  const enableQuestions = config.useEventStream && config.enableQuestions;
+  return {
+    useEventStream: config.useEventStream,
+    enableQuestions,
+    enableCardActions: enableQuestions && config.enableCardActions,
   };
 }

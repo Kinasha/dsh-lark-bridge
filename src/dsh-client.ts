@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import type { ToolEventView } from "@deepseek-ai/dsh-host-apiproxy/api";
 import type { MuxEvent } from "./session-event-stream.js";
 
 type JsonObject = Record<string, unknown>;
@@ -43,6 +44,8 @@ export interface SessionEvent {
   seq: number;
   time: number;
   data: unknown;
+  /** Host-computed, provider-neutral presentation for tool calls/results. */
+  view?: ToolEventView;
 }
 
 interface HistoryEntry {

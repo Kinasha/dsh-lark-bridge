@@ -114,7 +114,10 @@ export class ApiProxyDshClient implements DshBridgeClient {
         }),
       ),
     );
-    return value.events.map((entry) => entry.event as SessionEvent);
+    return value.events.map((entry) => ({
+      ...(entry.event as SessionEvent),
+      ...(entry.view === undefined ? {} : { view: entry.view }),
+    }));
   }
 
   async lastSeq(sessionId: string): Promise<number> {

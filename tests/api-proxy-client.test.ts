@@ -86,6 +86,41 @@ test("API proxy adapter unwraps gateway failures", async () => {
   );
 });
 
+test("history retains the host-computed tool presentation view", async () => {
+  const view = {
+    for: "result" as const,
+    view: { card: "terminal" as const, title: "Build", exitCode: 0 },
+  };
+  const api = {
+    sessions: {
+      history: () =>
+        success({
+          events: [
+            {
+              event: {
+                type: "tool/result",
+                seq: 7,
+                time: 20,
+                data: { message: { content: [] } },
+              },
+              view,
+            },
+          ],
+        }),
+    },
+  } as unknown as ApiProxy;
+
+  assert.deepEqual(await new ApiProxyDshClient(api).history("session-1"), [
+    {
+      type: "tool/result",
+      seq: 7,
+      time: 20,
+      data: { message: { content: [] } },
+      view,
+    },
+  ]);
+});
+
 test("API proxy session creation inherits the DSH default agent composition", async () => {
   let createPayload: unknown;
   const api = {

@@ -30,6 +30,11 @@ import {
 import type { CardKitCardHandle } from "./lark-cardkit.js";
 import { toolPresentation } from "./cot.js";
 import type { SessionEvent } from "./dsh-client.js";
+import type {
+  ProgressStyle,
+  ThinkingIcon,
+  ToolDetailMode,
+} from "./lark-config.js";
 import { silentLogger, type SemanticLogger } from "./logger.js";
 
 export const BODY_ELEMENT_ID = "dsh_body";
@@ -70,6 +75,8 @@ export interface CardStreamOptions {
   hasActionRow?: boolean;
   /** Terminal buttons installed once streaming has been closed. */
   terminalButtons?: readonly TerminalCardButton[];
+  /** Whether the progress panel folds after streaming closes. */
+  collapseProgressOnFinish?: boolean;
 }
 
 export interface StreamingCardInput {
@@ -202,7 +209,11 @@ export class CardReplySession {
   private readonly options: Required<
     Pick<
       CardStreamOptions,
-      "logger" | "elementMaxChars" | "maxElements" | "hasActionRow"
+      | "logger"
+      | "elementMaxChars"
+      | "maxElements"
+      | "hasActionRow"
+      | "collapseProgressOnFinish"
     >
   > & { terminalButtons: readonly TerminalCardButton[] };
 
@@ -219,6 +230,7 @@ export class CardReplySession {
       ),
       maxElements: options.maxElements ?? CARD_MAX_ELEMENTS,
       hasActionRow: options.hasActionRow ?? false,
+      collapseProgressOnFinish: options.collapseProgressOnFinish ?? true,
       terminalButtons: options.terminalButtons ?? [],
     };
     this.elementCount = initialElementCount;
@@ -296,7 +308,7 @@ export class CardReplySession {
       }
     } finally {
       await this.closeStreaming(input.summary ?? statusSummary(input.outcome));
-      await this.collapseSteps();
+      if (this.options.collapseProgressOnFinish) await this.collapseSteps();
       await this.installTerminalButtons(input.terminalButtons);
     }
   }
@@ -429,18 +441,145 @@ function statusSummary(outcome: CardTurnOutcome): string {
   return "回复已完成";
 }
 
+export interface CardProgressOptions {
+  toolDetailMode?: ToolDetailMode;
+  progressStyle?: ProgressStyle;
+  thinkingIcon?: ThinkingIcon;
+  maxProgressItems?: number;
+}
+
+interface OpenCardTool {
+  name: string;
+  title: string;
+  startedAt: number;
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function oneLine(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized ? normalized.slice(0, 240) : undefined;
+}
+
+function toolResultCallId(data: Record<string, unknown>): string | undefined {
+  const direct = oneLine(data.callId);
+  if (direct !== undefined) return direct;
+  const message = record(data.message);
+  const content = Array.isArray(message?.content) ? message.content : [];
+  for (const candidate of content) {
+    const block = record(candidate);
+    if (block?.type !== "tool-result") continue;
+    const callId = oneLine(block.toolCallId);
+    if (callId !== undefined) return callId;
+  }
+  return undefined;
+}
+
+function toolResultFailed(data: Record<string, unknown>): boolean {
+  if (record(data.error) !== undefined) return true;
+  const message = record(data.message);
+  const content = Array.isArray(message?.content) ? message.content : [];
+  return content.some((candidate) => {
+    const block = record(candidate);
+    return block?.type === "tool-result" && block.isError === true;
+  });
+}
+
+function durationText(startedAt: number, finishedAt: number): string | undefined {
+  const elapsed = finishedAt - startedAt;
+  if (!Number.isFinite(elapsed) || elapsed < 0) return undefined;
+  if (elapsed < 1_000) return `${Math.round(elapsed)} ms`;
+  if (elapsed < 60_000) return `${(elapsed / 1_000).toFixed(elapsed < 10_000 ? 1 : 0)} s`;
+  return `${(elapsed / 60_000).toFixed(1)} min`;
+}
+
+function locationText(locations: readonly { path: string; line?: number }[]): string[] {
+  const unique = [
+    ...new Set(
+      locations.map(({ path, line }) => `${path}${line === undefined ? "" : `:${line}`}`),
+    ),
+  ];
+  const shown = unique.slice(0, 3);
+  if (unique.length > shown.length) shown.push(`另有 ${unique.length - shown.length} 个位置`);
+  return shown;
+}
+
+function callDetails(event: SessionEvent): string[] {
+  if (event.view?.for !== "call") return [];
+  const view = event.view.view;
+  if (view.card === "generic") {
+    const locations = view.locations ?? [];
+    return locationText(locations).map((location) => `路径：${location}`);
+  }
+  if (view.card === "terminal") {
+    return view.cwd === undefined ? [] : [`工作目录：${view.cwd}`];
+  }
+  const paths = view.locations?.map(({ path, line }) => ({ path, line })) ??
+    view.diffs.map(({ path }) => ({ path }));
+  return locationText(paths).map((location) => `文件：${location}`);
+}
+
+function resultDetails(event: SessionEvent): string[] {
+  if (event.view?.for !== "result") return [];
+  const view = event.view.view;
+  if (view.card === "terminal") {
+    if (view.exitCode !== undefined) return [`退出码：${view.exitCode}`];
+    return view.signal === undefined ? [] : [`终止信号：${view.signal}`];
+  }
+  if (view.card === "read") {
+    return [`已读取 ${view.lines.length}/${view.totalLines} 行`];
+  }
+  if (view.card === "diff") {
+    return locationText(view.diffs.map(({ path }) => ({ path }))).map(
+      (location) => `已修改：${location}`,
+    );
+  }
+  if (view.card === "search") {
+    return [`找到 ${view.total} 项${view.truncated ? "（已截断）" : ""}`];
+  }
+  if (view.card === "web") {
+    if (view.kind === "search") {
+      return [`来源 ${view.sources.length} 项${view.truncated ? "（已截断）" : ""}`];
+    }
+    return [`HTTP ${view.statusCode}${view.truncated ? " · 内容已截断" : ""}`];
+  }
+  return [];
+}
+
+function thinkingGlyph(icon: ThinkingIcon): string {
+  if (icon === "sparkles") return "✨";
+  if (icon === "robot") return "🤖";
+  if (icon === "none") return "";
+  return "🧠";
+}
+
 /**
- * Projects DSH lifecycle events into the card's progress panel.
- *
- * Strictly append-only: one line per event, never a rewrite. That is what lets
- * the panel be streamed under the same prefix-monotonic rule as the body, so a
- * tool completing does not emit anything — the next line implies it.
+ * Projects DSH lifecycle events into a prefix-monotonic card progress panel.
+ * Only the host's UI-facing `ToolEventView` is eligible for detail rendering;
+ * raw arguments, result content, and diff bodies are deliberately ignored.
  */
 export class CardStepsProjection {
   private readonly seenSeqs = new Set<number>();
-  private readonly openTools = new Map<string, string>();
+  private readonly openTools = new Map<string, OpenCardTool>();
   private readonly lines: string[] = [];
+  private readonly options: Required<CardProgressOptions>;
   private steps = 0;
+  private items = 0;
+  private truncated = false;
+
+  constructor(options: CardProgressOptions = {}) {
+    this.options = {
+      toolDetailMode: options.toolDetailMode ?? "standard",
+      progressStyle: options.progressStyle ?? "timeline",
+      thinkingIcon: options.thinkingIcon ?? "brain",
+      maxProgressItems: options.maxProgressItems ?? 100,
+    };
+  }
 
   /** Absorbs a batch of events and returns the full panel text so far. */
   present(events: readonly SessionEvent[]): string {
@@ -453,8 +592,10 @@ export class CardStepsProjection {
           : undefined;
       if (event.type === "step/start") {
         this.steps += 1;
-        this.lines.push(
-          this.steps === 1 ? "- 🧠 正在分析任务…" : "- 🧠 正在根据执行结果继续分析…",
+        this.append(
+          "reasoning",
+          thinkingGlyph(this.options.thinkingIcon),
+          this.steps === 1 ? "正在分析任务…" : "正在根据执行结果继续分析…",
         );
         continue;
       }
@@ -462,14 +603,42 @@ export class CardStepsProjection {
         const callId = typeof data.callId === "string" ? data.callId.trim() : "";
         const name = typeof data.name === "string" ? data.name.trim() : "";
         if (callId && name && !this.openTools.has(callId)) {
-          this.openTools.set(callId, name);
-          this.lines.push(`- 🔧 ${toolPresentation(name).title}`);
+          const viewTitle =
+            event.view?.for === "call" ? oneLine(event.view.view.title) : undefined;
+          const title =
+            this.options.toolDetailMode === "compact"
+              ? toolPresentation(name).title
+              : (viewTitle ?? toolPresentation(name).title);
+          this.openTools.set(callId, { name, title, startedAt: event.time });
+          if (this.options.toolDetailMode !== "hidden") {
+            this.append(
+              "tool",
+              "🔧",
+              title,
+              this.options.toolDetailMode === "detailed" ? callDetails(event) : [],
+            );
+          }
         }
         continue;
       }
       if (event.type === "tool/result" && data !== undefined) {
-        const callId = typeof data.callId === "string" ? data.callId.trim() : "";
-        if (callId) this.openTools.delete(callId);
+        const callId = toolResultCallId(data);
+        const tool = callId === undefined ? undefined : this.openTools.get(callId);
+        if (callId !== undefined) this.openTools.delete(callId);
+        if (
+          tool !== undefined &&
+          (this.options.toolDetailMode === "standard" ||
+            this.options.toolDetailMode === "detailed")
+        ) {
+          const failed = toolResultFailed(data);
+          const duration = durationText(tool.startedAt, event.time);
+          this.append(
+            "result",
+            failed ? "❌" : "✅",
+            `${tool.title}${duration === undefined ? "" : ` · ${duration}`}`,
+            this.options.toolDetailMode === "detailed" ? resultDetails(event) : [],
+          );
+        }
       }
     }
     return this.text();
@@ -477,5 +646,46 @@ export class CardStepsProjection {
 
   text(): string {
     return this.lines.join("\n");
+  }
+
+  private append(
+    kind: "reasoning" | "tool" | "result" | "notice",
+    icon: string,
+    content: string,
+    details: readonly string[] = [],
+  ): void {
+    if (this.items >= this.options.maxProgressItems) {
+      if (!this.truncated) {
+        this.truncated = true;
+        this.lines.push(
+          this.mainLine(
+            "notice",
+            "",
+            `… 后续执行过程已省略（最多 ${this.options.maxProgressItems} 项）`,
+          ),
+        );
+      }
+      return;
+    }
+    this.items += 1;
+    this.lines.push(this.mainLine(kind, icon, content));
+    for (const detail of details) this.lines.push(this.detailLine(detail));
+  }
+
+  private mainLine(
+    kind: "reasoning" | "tool" | "result" | "notice",
+    icon: string,
+    content: string,
+  ): string {
+    const label = icon ? `${icon} ${content}` : content;
+    if (this.options.progressStyle === "plain") return label;
+    if (this.options.progressStyle === "list") return `- ${label}`;
+    return `${kind === "reasoning" ? "●" : "├─"} ${label}`;
+  }
+
+  private detailLine(content: string): string {
+    if (this.options.progressStyle === "plain") return `  ${content}`;
+    if (this.options.progressStyle === "list") return `  - ${content}`;
+    return `│  ${content}`;
   }
 }

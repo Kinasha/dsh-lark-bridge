@@ -1,6 +1,6 @@
 {
   "name": "@open-aiden/dsh-lark-bridge",
-  "version": "0.0.9",
+  "version": "0.0.10",
   "private": false,
   "type": "module",
   "description": "Feishu/Lark message bridge for DeepSeek Harness",
@@ -53,6 +53,7 @@
     "dist/src/lark-card.*",
     "dist/src/lark-cardkit.*",
     "dist/src/lark-config.*",
+    "dist/src/lark-config-reload.*",
     "dist/src/lark-credentials.*",
     "dist/src/lark-html-host.*",
     "dist/src/lark-html-parse.*",

@@ -5,6 +5,7 @@ import {
   BODY_ELEMENT_ID,
   buildStreamingCard,
   CardReplySession,
+  CardStepsProjection,
   committedPrefix,
   EMPTY_BODY_TEXT,
   splitForRollover,
@@ -96,6 +97,138 @@ test("omits the action row when no stop behavior is supplied", () => {
   );
 });
 
+test("detailed timeline progress uses safe ToolEventView metadata and completion timing", () => {
+  const projection = new CardStepsProjection({
+    toolDetailMode: "detailed",
+    progressStyle: "timeline",
+    thinkingIcon: "robot",
+    maxProgressItems: 10,
+  });
+
+  assert.equal(
+    projection.present([
+      { type: "step/start", seq: 1, time: 0, data: { step: 1 } },
+      {
+        type: "tool/call",
+        seq: 2,
+        time: 10,
+        data: { callId: "call-1", name: "read", arguments: "SECRET_ARG" },
+        view: {
+          for: "call",
+          view: {
+            card: "generic",
+            title: "Read src/plugin.ts",
+            kind: "read",
+            rawInput: "SECRET_INPUT",
+            locations: [{ path: "src/plugin.ts", line: 88 }],
+          },
+        },
+      },
+      {
+        type: "tool/result",
+        seq: 3,
+        time: 160,
+        data: {
+          message: {
+            content: [
+              {
+                type: "tool-result",
+                toolCallId: "call-1",
+                isError: false,
+                content: [{ type: "text", text: "SECRET_RESULT" }],
+              },
+            ],
+          },
+        },
+        view: {
+          for: "result",
+          view: {
+            card: "read",
+            title: "Read src/plugin.ts",
+            path: "src/plugin.ts",
+            offset: 88,
+            lines: [{ number: 88, text: "SECRET_LINE" }],
+            totalLines: 420,
+          },
+        },
+      },
+    ]),
+    [
+      "● 🤖 正在分析任务…",
+      "├─ 🔧 Read src/plugin.ts",
+      "│  路径：src/plugin.ts:88",
+      "├─ ✅ Read src/plugin.ts · 150 ms",
+      "│  已读取 1/420 行",
+    ].join("\n"),
+  );
+  assert.doesNotMatch(projection.text(), /SECRET/);
+});
+
+test("tool detail modes and progress styles remain distinct", () => {
+  const events = [
+    { type: "step/start", seq: 1, time: 0, data: {} },
+    {
+      type: "tool/call",
+      seq: 2,
+      time: 1,
+      data: { callId: "call-1", name: "read", arguments: "{}" },
+      view: {
+        for: "call" as const,
+        view: { card: "generic" as const, title: "Read src/a.ts", kind: "read" as const },
+      },
+    },
+    {
+      type: "tool/result",
+      seq: 3,
+      time: 2,
+      data: { callId: "call-1" },
+    },
+  ];
+
+  assert.equal(
+    new CardStepsProjection({
+      toolDetailMode: "hidden",
+      progressStyle: "plain",
+      thinkingIcon: "none",
+    }).present(events),
+    "正在分析任务…",
+  );
+  assert.equal(
+    new CardStepsProjection({
+      toolDetailMode: "compact",
+      progressStyle: "list",
+      thinkingIcon: "sparkles",
+    }).present(events),
+    "- ✨ 正在分析任务…\n- 🔧 读取文件",
+  );
+  assert.equal(
+    new CardStepsProjection({
+      toolDetailMode: "standard",
+      progressStyle: "list",
+      thinkingIcon: "brain",
+    }).present(events),
+    "- 🧠 正在分析任务…\n- 🔧 Read src/a.ts\n- ✅ Read src/a.ts · 1 ms",
+  );
+});
+
+test("progress caps visible entries without leaking later events", () => {
+  const projection = new CardStepsProjection({
+    toolDetailMode: "compact",
+    progressStyle: "list",
+    maxProgressItems: 2,
+  });
+  const text = projection.present([
+    { type: "step/start", seq: 1, time: 0, data: {} },
+    { type: "tool/call", seq: 2, time: 1, data: { callId: "c1", name: "read" } },
+    { type: "tool/call", seq: 3, time: 2, data: { callId: "c2", name: "bash" } },
+  ]);
+  assert.equal(
+    text,
+    "- 🧠 正在分析任务…\n- 🔧 读取文件\n- … 后续执行过程已省略（最多 2 项）",
+  );
+  assert.doesNotMatch(text, /bash/);
+});
+
 test("interleaved progress and answer updates stay independent and collapse at the end", async () => {
   const { handle, calls } = fakeHandle();
   const session = new CardReplySession(handle);
@@ -166,6 +299,23 @@ test("a failed final collapse does not lose the answer or terminal buttons", asy
   assert.ok(calls.some((call) => call.op === "settings"));
   assert.ok(calls.some((call) => call.op === "replace"));
   assert.deepEqual(warnings, ["card_steps_collapse_failed"]);
+});
+
+test("progress can remain expanded after the turn finishes", async () => {
+  const { handle, calls } = fakeHandle();
+  const session = new CardReplySession(handle, {
+    collapseProgressOnFinish: false,
+  });
+  await session.pushSteps("- still useful\n");
+  await session.finalize({ outcome: "done", text: "answer" });
+
+  assert.equal(
+    calls.some(
+      (call) => call.op === "patch" && call.elementId === STEPS_PANEL_ELEMENT_ID,
+    ),
+    false,
+  );
+  assert.ok(calls.some((call) => call.op === "settings"));
 });
 
 test("commits only whole lines outside an open code fence", () => {

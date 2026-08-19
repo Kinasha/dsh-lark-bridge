@@ -102,4 +102,9 @@ test("evaluating each expression yields a value the schema accepts", () => {
   assert.equal(resolved.allowSlashCommands, false);
   assert.equal(resolved.maxConcurrentTopics, 4);
   assert.equal(resolved.turnTimeoutMs, 0);
+  assert.equal(resolved.toolDetailMode, "standard");
+  assert.equal(resolved.progressStyle, "timeline");
+  assert.equal(resolved.thinkingIcon, "brain");
+  assert.equal(resolved.maxProgressItems, 100);
+  assert.equal(resolved.collapseProgressOnFinish, true);
 });

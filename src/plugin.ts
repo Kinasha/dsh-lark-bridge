@@ -31,6 +31,7 @@ import {
   Config,
   normalizeConfig,
   replyModePolicy,
+  runtimeFeaturePolicy,
   type NormalizedLarkConfig,
 } from "./lark-config.js";
 import {
@@ -49,6 +50,10 @@ import {
   SessionEventStream,
   type SessionEventSourcePort,
 } from "./session-event-stream.js";
+import {
+  LarkRuntimeReloader,
+  requiresRuntimeReload,
+} from "./lark-config-reload.js";
 
 export const name = "@open-aiden/dsh-lark-bridge";
 /**
@@ -62,7 +67,7 @@ export const inject = {
 };
 export const LARK_SETTINGS_NAMESPACE = "dsh-lark-bridge" as SettingsNamespace;
 
-export { Config, normalizeConfig, replyModePolicy };
+export { Config, normalizeConfig, replyModePolicy, runtimeFeaturePolicy };
 export type { NormalizedLarkConfig };
 
 /**
@@ -88,7 +93,7 @@ export async function apply(ctx: Context, input: Config): Promise<void> {
   const settingsScope = ctx.settings.register(
     LARK_SETTINGS_NAMESPACE,
     Config,
-    { base: input, applies: "restart" },
+    { base: input, applies: "live" },
   );
   if (ctx.webServer.host === "127.0.0.1") {
     ctx.effect(
@@ -141,7 +146,58 @@ export async function apply(ctx: Context, input: Config): Promise<void> {
     logger.warn("settings_web=disabled reason=web_host_is_not_loopback");
   }
 
-  const config = normalizeConfig(settingsScope.get());
+  const reloader = new LarkRuntimeReloader((current) => {
+    const fiber = ctx.plugin(async (runtimeCtx) => {
+      await installRuntime(runtimeCtx, current);
+    });
+    return { dispose: fiber.dispose };
+  });
+
+  const stopWatching = settingsScope.watch(async (next, previous) => {
+    const normalized = normalizeConfig(next);
+    const previousNormalized = normalizeConfig(previous);
+    const structural = requiresRuntimeReload(previousNormalized, normalized);
+    logger.info(
+      "settings_reloaded mode=%s",
+      structural ? "runtime" : "live",
+    );
+    await reloader.apply(normalized);
+  });
+  ctx.effect(
+    () => async () => {
+      stopWatching();
+      await reloader.close();
+    },
+    "dsh-lark settings hot reload",
+  );
+
+  // Credential values are not part of the settings document. Rebuild the
+  // runtime so the SDK client captures the newly resolved pair.
+  ctx.effect(() => {
+    const dispose = ctx.on?.("credentials/updated", (ref: unknown) => {
+      if (ref !== LARK_APP_ID_REF && ref !== LARK_APP_SECRET_REF) return;
+      logger.info("credentials_reloaded ref=%s", String(ref));
+      void reloader
+        .apply(normalizeConfig(settingsScope.get()), { force: true })
+        .catch((error: unknown) => {
+          logger.error(
+            "credentials_reload_failed error=%s",
+            error instanceof Error ? error.message : String(error),
+          );
+        });
+    });
+    return () => dispose?.();
+  }, "dsh-lark credential hot reload");
+
+  await reloader.apply(normalizeConfig(settingsScope.get()));
+}
+
+async function installRuntime(
+  ctx: Context,
+  currentConfig: () => NormalizedLarkConfig,
+): Promise<void> {
+  const logger = ctx.logger(name);
+  const config = currentConfig();
 
   if (!config.enabled) {
     logger.info("status=disabled");
@@ -182,6 +238,7 @@ export async function apply(ctx: Context, input: Config): Promise<void> {
     semanticLogger,
     config.domain,
   );
+  const featurePolicy = runtimeFeaturePolicy(config);
   const eventSource: SessionEventSourcePort = {
     events: {
       mux: (request, signal) =>
@@ -189,15 +246,23 @@ export async function apply(ctx: Context, input: Config): Promise<void> {
     },
     respond: (message) => ctx.apiProxy.respond(message as never),
   };
-  const eventStream = new SessionEventStream(eventSource, {
-    logger: semanticLogger,
-  });
+  const eventStream = featurePolicy.useEventStream
+    ? new SessionEventStream(eventSource, { logger: semanticLogger })
+    : undefined;
   const cardActions = new CardActionRegistry();
-  const questions = new LarkQuestionController({
-    stream: eventStream,
-    registry: cardActions,
-    logger: semanticLogger,
-  });
+  const questions =
+    featurePolicy.enableQuestions && eventStream !== undefined
+      ? new LarkQuestionController({
+          stream: eventStream,
+          registry: cardActions,
+          logger: semanticLogger,
+        })
+      : undefined;
+  if (config.enableQuestions && questions === undefined) {
+    semanticLogger.warn("lark_questions_disabled", {
+      reason: "event_stream_disabled",
+    });
+  }
   const unsupportedCardAction = async (): Promise<void> => {
     throw new Error("card action is not enabled by this bridge");
   };
@@ -206,7 +271,10 @@ export async function apply(ctx: Context, input: Config): Promise<void> {
     retry: unsupportedCardAction,
     newTopic: unsupportedCardAction,
     approve: unsupportedCardAction,
-    answer: (input) => questions.answerOption(input),
+    answer:
+      questions === undefined
+        ? unsupportedCardAction
+        : (input) => questions.answerOption(input),
   };
   const cardActionRouter = new CardActionRouter({
     registry: cardActions,
@@ -242,7 +310,7 @@ export async function apply(ctx: Context, input: Config): Promise<void> {
     ...(userAuth === undefined ? {} : { userAuth }),
     logger: semanticLogger,
     maxPendingMessages: config.maxPendingMessages,
-    ...(config.enableQuestions
+    ...(featurePolicy.enableCardActions
       ? { onCardAction: (raw: unknown) => cardActionRouter.handle(raw) }
       : {}),
   });
@@ -278,21 +346,30 @@ export async function apply(ctx: Context, input: Config): Promise<void> {
   // `post` is a strict single-surface mode; CardKit and COT are card-mode tiers.
   const replyPolicy = replyModePolicy(config);
   const cardKitGateway =
-    config.enableCardKit && (replyPolicy.enableCardKit || config.enableQuestions)
+    config.enableCardKit && (replyPolicy.enableCardKit || questions !== undefined)
       ? new LarkCardKitGateway(apiClient, { logger: semanticLogger })
       : undefined;
   const replyChannel = new LarkReplyChannel({
     transport: transport,
     ...(cardKitGateway === undefined ? {} : { cardkit: cardKitGateway }),
     logger: semanticLogger,
-    ...(config.enableQuestions ? { buttons: questions } : {}),
-    config: {
-      enableCardKit: replyPolicy.enableCardKit,
-      enableCot: replyPolicy.enableCot,
-      alwaysPostFinal: config.alwaysPostFinal,
-      printFrequencyMs: config.streamPrintFrequencyMs,
-      printStep: config.streamPrintStep,
-      streamElementMaxChars: config.streamElementMaxChars,
+    ...(questions === undefined ? {} : { buttons: questions }),
+    config: () => {
+      const active = currentConfig();
+      const activePolicy = replyModePolicy(active);
+      return {
+        enableCardKit: activePolicy.enableCardKit,
+        enableCot: activePolicy.enableCot,
+        alwaysPostFinal: active.alwaysPostFinal,
+        printFrequencyMs: active.streamPrintFrequencyMs,
+        printStep: active.streamPrintStep,
+        streamElementMaxChars: active.streamElementMaxChars,
+        toolDetailMode: active.toolDetailMode,
+        progressStyle: active.progressStyle,
+        thinkingIcon: active.thinkingIcon,
+        maxProgressItems: active.maxProgressItems,
+        collapseProgressOnFinish: active.collapseProgressOnFinish,
+      };
     },
   });
   logger.info(
@@ -305,19 +382,21 @@ export async function apply(ctx: Context, input: Config): Promise<void> {
   const supervisor = new ConsumerSupervisor({ logger: semanticLogger });
   let ready: Promise<void> | undefined;
 
-  ctx.effect(() => {
-    const shutdown = new AbortController();
-    const running = eventStream.start(shutdown.signal);
-    void running.catch((error: unknown) => {
-      semanticLogger.error("session_event_stream_failed", {
-        errorName: error instanceof Error ? error.name : typeof error,
+  if (eventStream !== undefined) {
+    ctx.effect(() => {
+      const shutdown = new AbortController();
+      const running = eventStream.start(shutdown.signal);
+      void running.catch((error: unknown) => {
+        semanticLogger.error("session_event_stream_failed", {
+          errorName: error instanceof Error ? error.name : typeof error,
+        });
       });
-    });
-    return async () => {
-      shutdown.abort(new Error("dsh-lark event stream stopped"));
-      await running.catch(() => undefined);
-    };
-  }, "dsh-lark session event stream");
+      return async () => {
+        shutdown.abort(new Error("dsh-lark event stream stopped"));
+        await running.catch(() => undefined);
+      };
+    }, "dsh-lark session event stream");
+  }
 
   ctx.effect(() => {
     ready = supervisor.start(async (signal, onReady) => {
@@ -326,9 +405,9 @@ export async function apply(ctx: Context, input: Config): Promise<void> {
         lark: transport,
         replyChannel,
         allowSlashCommands: config.allowSlashCommands,
-        enableQuestions: config.enableQuestions,
+        enableQuestions: featurePolicy.enableQuestions,
         enableWebCot: replyPolicy.enableCot,
-        ...(config.enableQuestions ? { questionAnswers: questions } : {}),
+        ...(questions === undefined ? {} : { questionAnswers: questions }),
         signal,
         workspacePath: config.workspacePath,
         ...(config.workspaceTitle === undefined
@@ -355,21 +434,6 @@ export async function apply(ctx: Context, input: Config): Promise<void> {
   if (ready === undefined) {
     throw new Error("dsh-lark consumer effect did not start");
   }
-
-  // The SDK client captures appId/appSecret at construction, so honouring the
-  // credential seam's "resolve per operation" contract means reconnecting.
-  ctx.effect(() => {
-    const dispose = ctx.on?.("credentials/updated", (ref: unknown) => {
-      if (ref !== LARK_APP_ID_REF && ref !== LARK_APP_SECRET_REF) return;
-      semanticLogger.info("lark_credentials_rotated", { ref: String(ref) });
-      void supervisor.restart().catch((error: unknown) => {
-        semanticLogger.error("lark_credentials_restart_failed", {
-          errorName: error instanceof Error ? error.name : typeof error,
-        });
-      });
-    });
-    return () => dispose?.();
-  }, "dsh-lark credential rotation");
 
   await ready;
   logger.info(

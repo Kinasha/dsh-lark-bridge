@@ -19,6 +19,7 @@ import {
   CardReplySession,
   CardStepsProjection,
   buildStreamingCard,
+  type CardProgressOptions,
   type CardStreamOptions,
   type CardTurnOutcome,
   type TerminalCardButton,
@@ -36,6 +37,11 @@ import type { SessionEvent } from "./dsh-client.js";
 import type { CardElement } from "./lark-card.js";
 import { silentLogger, type SemanticLogger } from "./logger.js";
 import type { MuxEvent } from "./session-event-stream.js";
+import type {
+  ProgressStyle,
+  ThinkingIcon,
+  ToolDetailMode,
+} from "./lark-config.js";
 
 export type ReplyTier = "cardkit" | "cot" | "post";
 
@@ -117,6 +123,11 @@ export interface ReplyChannelConfig {
   printStep?: number;
   streamElementMaxChars?: number;
   cardTitle?: string;
+  toolDetailMode?: ToolDetailMode;
+  progressStyle?: ProgressStyle;
+  thinkingIcon?: ThinkingIcon;
+  maxProgressItems?: number;
+  collapseProgressOnFinish?: boolean;
 }
 
 export interface ReplyChannelOptions {
@@ -126,7 +137,8 @@ export interface ReplyChannelOptions {
   renderCard?: (text: string) => Promise<string>;
   buttons?: ReplyButtonProvider;
   logger?: SemanticLogger;
-  config?: ReplyChannelConfig;
+  /** Read at `open()` so saved settings affect new turns without mutating open cards. */
+  config?: ReplyChannelConfig | (() => ReplyChannelConfig);
 }
 
 export interface OpenReplyInput {
@@ -279,7 +291,7 @@ class CotReplySession extends PostReplySession {
 /** The card carries progress and the final answer in one message. */
 class CardKitReplySession implements ReplySession {
   readonly tier: ReplyTier = "cardkit";
-  private readonly steps = new CardStepsProjection();
+  private readonly steps: CardStepsProjection;
   private broken = false;
 
   constructor(
@@ -290,9 +302,12 @@ class CardKitReplySession implements ReplySession {
       renderCard: (text: string) => Promise<string>;
       buttons: ReplyButtonProvider;
       alwaysPostFinal: boolean;
+      progress: CardProgressOptions;
       logger: SemanticLogger;
     },
-  ) {}
+  ) {
+    this.steps = new CardStepsProjection(input.progress);
+  }
 
   get cardId(): string {
     return this.session.cardId;
@@ -394,48 +409,29 @@ export class LarkReplyChannel {
   private questionCardAvailable: boolean;
   private cotAvailable: boolean;
   private readonly logger: SemanticLogger;
-  private readonly config: Required<
-    Pick<
-      ReplyChannelConfig,
-      "enableCardKit" | "enableCot" | "alwaysPostFinal" | "printFrequencyMs" | "printStep"
-    >
-  > & { streamElementMaxChars?: number; cardTitle?: string };
 
   constructor(private readonly options: ReplyChannelOptions) {
     this.logger = options.logger ?? silentLogger;
-    this.config = {
-      enableCardKit: options.config?.enableCardKit ?? true,
-      enableCot: options.config?.enableCot ?? true,
-      alwaysPostFinal: options.config?.alwaysPostFinal ?? false,
-      printFrequencyMs: options.config?.printFrequencyMs ?? 70,
-      printStep: options.config?.printStep ?? 1,
-      ...(options.config?.streamElementMaxChars === undefined
-        ? {}
-        : { streamElementMaxChars: options.config.streamElementMaxChars }),
-      ...(options.config?.cardTitle === undefined
-        ? {}
-        : { cardTitle: options.config.cardTitle }),
-    };
     this.cardKitAvailable =
-      this.config.enableCardKit &&
       options.cardkit !== undefined &&
       options.transport.replyWithCard !== undefined;
     this.questionCardAvailable =
       options.cardkit !== undefined &&
       options.transport.replyWithCard !== undefined &&
       options.buttons?.question !== undefined;
-    this.cotAvailable =
-      this.config.enableCot && options.transport.createCot !== undefined;
+    this.cotAvailable = options.transport.createCot !== undefined;
   }
 
   /** Which tier the next `open()` would try first; exposed for diagnostics. */
   get preferredTier(): ReplyTier {
-    if (this.cardKitAvailable) return "cardkit";
-    if (this.cotAvailable) return "cot";
+    const config = this.currentConfig();
+    if (config.enableCardKit && this.cardKitAvailable) return "cardkit";
+    if (config.enableCot && this.cotAvailable) return "cot";
     return "post";
   }
 
   async open(input: OpenReplyInput): Promise<ReplySession> {
+    const config = this.currentConfig();
     const questionPresenter: QuestionPresenter = (event) =>
       this.presentQuestionCard(input, event);
     const fallback = new PostReplySession(
@@ -444,11 +440,11 @@ export class LarkReplyChannel {
       questionPresenter,
     );
     return (
-      (await this.openCardKit(input, fallback)) ??
+      (await this.openCardKit(input, fallback, config)) ??
       // message_cot cannot carry a top-level reply into the topic it creates.
       (input.route.replyInThread
         ? undefined
-        : await this.openCot(input, questionPresenter)) ??
+        : await this.openCot(input, questionPresenter, config)) ??
       fallback
     );
   }
@@ -473,7 +469,7 @@ export class LarkReplyChannel {
     if (elements.length === 0) return false;
     try {
       const handle = await gateway.createCard(
-        buildQuestionCard(elements, this.config.cardTitle),
+        buildQuestionCard(elements, this.currentConfig().cardTitle),
       );
       const sent = await transport.replyWithCard({
         route: {
@@ -538,10 +534,12 @@ export class LarkReplyChannel {
   private async openCardKit(
     input: OpenReplyInput,
     fallback: PostReplySession,
+    config: ResolvedReplyChannelConfig,
   ): Promise<ReplySession | undefined> {
     const gateway = this.options.cardkit;
     const transport = this.options.transport;
     if (
+      !config.enableCardKit ||
       !this.cardKitAvailable ||
       gateway === undefined ||
       transport.replyWithCard === undefined
@@ -553,18 +551,19 @@ export class LarkReplyChannel {
       const stopBehaviors = buttons.stop({ sessionId: input.sessionId });
       const handle = await gateway.createCard(
         buildStreamingCard({
-          ...(this.config.cardTitle === undefined ? {} : { title: this.config.cardTitle }),
-          printFrequencyMs: this.config.printFrequencyMs,
-          printStep: this.config.printStep,
+          ...(config.cardTitle === undefined ? {} : { title: config.cardTitle }),
+          printFrequencyMs: config.printFrequencyMs,
+          printStep: config.printStep,
           ...(stopBehaviors === undefined ? {} : { stopBehaviors }),
         }),
       );
       const streamOptions: CardStreamOptions = {
         logger: this.logger,
         hasActionRow: stopBehaviors !== undefined,
-        ...(this.config.streamElementMaxChars === undefined
+        collapseProgressOnFinish: config.collapseProgressOnFinish,
+        ...(config.streamElementMaxChars === undefined
           ? {}
-          : { elementMaxChars: this.config.streamElementMaxChars }),
+          : { elementMaxChars: config.streamElementMaxChars }),
       };
       const session = new CardReplySession(
         handle,
@@ -601,7 +600,13 @@ export class LarkReplyChannel {
         sessionId: input.sessionId,
         renderCard: this.options.renderCard ?? (async (text) => text),
         buttons,
-        alwaysPostFinal: this.config.alwaysPostFinal,
+        alwaysPostFinal: config.alwaysPostFinal,
+        progress: {
+          toolDetailMode: config.toolDetailMode,
+          progressStyle: config.progressStyle,
+          thinkingIcon: config.thinkingIcon,
+          maxProgressItems: config.maxProgressItems,
+        },
         logger: this.logger,
       });
     } catch (error) {
@@ -621,9 +626,12 @@ export class LarkReplyChannel {
   private async openCot(
     input: OpenReplyInput,
     questionPresenter: QuestionPresenter,
+    config: ResolvedReplyChannelConfig,
   ): Promise<ReplySession | undefined> {
     const transport = this.options.transport;
-    if (!this.cotAvailable || transport.createCot === undefined) return undefined;
+    if (!config.enableCot || !this.cotAvailable || transport.createCot === undefined) {
+      return undefined;
+    }
     try {
       const cot = await transport.createCot({
         chatId: input.route.chatId,
@@ -662,4 +670,48 @@ export class LarkReplyChannel {
       return undefined;
     }
   }
+
+  private currentConfig(): ResolvedReplyChannelConfig {
+    const source =
+      typeof this.options.config === "function"
+        ? this.options.config()
+        : (this.options.config ?? {});
+    return resolveReplyChannelConfig(source);
+  }
+}
+
+interface ResolvedReplyChannelConfig {
+  enableCardKit: boolean;
+  enableCot: boolean;
+  alwaysPostFinal: boolean;
+  printFrequencyMs: number;
+  printStep: number;
+  streamElementMaxChars?: number;
+  cardTitle?: string;
+  toolDetailMode: ToolDetailMode;
+  progressStyle: ProgressStyle;
+  thinkingIcon: ThinkingIcon;
+  maxProgressItems: number;
+  collapseProgressOnFinish: boolean;
+}
+
+function resolveReplyChannelConfig(
+  config: ReplyChannelConfig,
+): ResolvedReplyChannelConfig {
+  return {
+    enableCardKit: config.enableCardKit ?? true,
+    enableCot: config.enableCot ?? true,
+    alwaysPostFinal: config.alwaysPostFinal ?? false,
+    printFrequencyMs: config.printFrequencyMs ?? 70,
+    printStep: config.printStep ?? 1,
+    ...(config.streamElementMaxChars === undefined
+      ? {}
+      : { streamElementMaxChars: config.streamElementMaxChars }),
+    ...(config.cardTitle === undefined ? {} : { cardTitle: config.cardTitle }),
+    toolDetailMode: config.toolDetailMode ?? "standard",
+    progressStyle: config.progressStyle ?? "timeline",
+    thinkingIcon: config.thinkingIcon ?? "brain",
+    maxProgressItems: config.maxProgressItems ?? 100,
+    collapseProgressOnFinish: config.collapseProgressOnFinish ?? true,
+  };
 }

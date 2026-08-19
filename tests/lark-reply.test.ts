@@ -4,6 +4,7 @@ import {
   LarkReplyChannel,
   NO_BUTTONS,
   type ReplyButtonProvider,
+  type ReplyChannelConfig,
   type ReplyRoute,
   type ReplyTransportPort,
 } from "../src/lark-reply.js";
@@ -66,6 +67,7 @@ function harness(options?: {
   buttons?: ReplyButtonProvider;
   alwaysPostFinal?: boolean;
   enableCardKit?: boolean;
+  config?: ReplyChannelConfig | (() => ReplyChannelConfig);
 }): { channel: LarkReplyChannel; journal: Journal } {
   const journal: Journal = {
     posts: [],
@@ -163,14 +165,16 @@ function harness(options?: {
           }),
         }),
     buttons: options?.buttons ?? NO_BUTTONS,
-    config: {
-      ...(options?.enableCardKit === undefined
-        ? {}
-        : { enableCardKit: options.enableCardKit }),
-      ...(options?.alwaysPostFinal === undefined
-        ? {}
-        : { alwaysPostFinal: options.alwaysPostFinal }),
-    },
+    config:
+      options?.config ??
+      {
+        ...(options?.enableCardKit === undefined
+          ? {}
+          : { enableCardKit: options.enableCardKit }),
+        ...(options?.alwaysPostFinal === undefined
+          ? {}
+          : { alwaysPostFinal: options.alwaysPostFinal }),
+      },
   });
   return { channel, journal };
 }
@@ -222,6 +226,41 @@ test("prefers the card tier and delivers the answer in the card", async () => {
   assert.ok(operations.includes("cardElement.content"));
   const settingsIndex = operations.indexOf("card.settings");
   assert.ok(settingsIndex > operations.indexOf("cardElement.content"));
+});
+
+test("new turns hot-reload reply policy while open turns keep their progress snapshot", async () => {
+  let config: ReplyChannelConfig = {
+    enableCardKit: false,
+    enableCot: false,
+    toolDetailMode: "hidden",
+    progressStyle: "plain",
+    thinkingIcon: "none",
+  };
+  const { channel, journal } = harness({ config: () => config });
+
+  assert.equal(channel.preferredTier, "post");
+  assert.equal((await open(channel)).tier, "post");
+
+  config = { ...config, enableCardKit: true };
+  const firstCard = await open(channel);
+  assert.equal(firstCard.tier, "cardkit");
+
+  config = {
+    ...config,
+    toolDetailMode: "detailed",
+    progressStyle: "list",
+    thinkingIcon: "robot",
+  };
+  await firstCard.present(EVENTS);
+  const secondCard = await open(channel);
+  await secondCard.present(EVENTS);
+
+  const progress = journal.cardOps
+    .filter((call) => call.operation === "cardElement.content")
+    .map((call) => call.data.content)
+    .filter((content): content is string => typeof content === "string");
+  assert.equal(progress[0], "正在分析任务…", "the first open card keeps hidden/plain settings");
+  assert.match(progress[1] ?? "", /^- 🤖 正在分析任务…\n- 🔧 读取文件/);
 });
 
 test("falls back directly to an in-thread post when CardKit cannot create a topic reply", async () => {

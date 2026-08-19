@@ -21,6 +21,7 @@
  * trusted from the type declaration.
  */
 
+import type { ToolEventView } from "@deepseek-ai/dsh-host-apiproxy/api";
 import type { SessionEvent } from "./dsh-client.js";
 import { silentLogger, type SemanticLogger } from "./logger.js";
 
@@ -117,16 +118,30 @@ function text(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function sessionEvent(value: unknown): SessionEvent | undefined {
+function toolEventView(value: unknown): ToolEventView | undefined {
+  const raw = object(value);
+  if (
+    raw === undefined ||
+    (raw.for !== "call" && raw.for !== "result") ||
+    object(raw.view) === undefined
+  ) {
+    return undefined;
+  }
+  return value as ToolEventView;
+}
+
+function sessionEvent(value: unknown, viewValue?: unknown): SessionEvent | undefined {
   const raw = object(value);
   if (raw === undefined) return undefined;
   const type = text(raw.type);
   if (type === undefined || typeof raw.seq !== "number") return undefined;
+  const view = toolEventView(viewValue);
   return {
     type,
     seq: raw.seq,
     time: typeof raw.time === "number" ? raw.time : 0,
     data: raw.data,
+    ...(view === undefined ? {} : { view }),
   };
 }
 
@@ -190,7 +205,7 @@ export function narrowMuxFrame(
   if (sessionId === undefined) return undefined;
 
   if (type === "session/event") {
-    const event = sessionEvent(frame.event);
+    const event = sessionEvent(frame.event, frame.view);
     return event === undefined ? undefined : { type, sessionId, event };
   }
   if (type === "session/subscribed") {

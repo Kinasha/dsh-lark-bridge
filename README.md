@@ -24,9 +24,9 @@ export LARK_APP_SECRET=xxx
 - 默认把机器人对一条私聊消息的首次回复创建为飞书话题，并在话题下继续回复。
 - 收到消息后先添加 `Get` 表情作为处理回执；流式回复表面创建成功后自动移除。
 - `replyMode=card` 时，CardKit 流式卡片和最终答案始终位于同一个话题；CardKit
-  顶部的执行过程会随工具调用更新，正文在其下方独立流式增长，完成后执行过程自动
-  折叠。CardKit 不可用时，创建新话题的顶层消息直接降级为话题内 `post`，不会先发送
-  顶层 COT。
+  顶部的执行过程会随分析与工具调用穿插更新，正文在其下方独立流式增长。执行过程可
+  选择四档工具详情、三种布局和四种思维图标，也可控制条目上限与完成后是否折叠。
+  CardKit 不可用时，创建新话题的顶层消息直接降级为话题内 `post`，不会先发送顶层 COT。
 - 每个飞书话题对应一个稳定的 DSH Session；同一私聊中的不同话题相互隔离。
 - 飞书 Session 和浏览器 Session 使用同一个 DSH Host；Web UI 可以看到完整对话、
   推理过程、工具调用和最终回复。
@@ -41,7 +41,7 @@ export LARK_APP_SECRET=xxx
 - COT 不包含模型隐藏推理、工具参数或文件内容；它只用于无需新建话题的合格路由。
   `replyMode=post` 严格只使用 `post` 作为主回复表面。
 
-当前 `0.0.9` 兼容 `@deepseek-ai/dsh@0.1.0-rc.7`。DSH 仍处于 developer
+当前 `0.0.10` 兼容 `@deepseek-ai/dsh@0.1.0-rc.7`。DSH 仍处于 developer
 preview，升级 DSH 后请重新执行本文的验证步骤。
 
 ## 1. 准备飞书应用
@@ -94,7 +94,7 @@ git clone https://github.com/Kinasha/dsh-lark-bridge.git
 cd dsh-lark-bridge
 npm ci
 npm pack
-dsh plugin --profile web add ./open-aiden-dsh-lark-bridge-0.0.9.tgz \
+dsh plugin --profile web add ./open-aiden-dsh-lark-bridge-0.0.10.tgz \
   --allow-build=protobufjs
 ```
 
@@ -129,9 +129,9 @@ DSH 插件都已就绪。然后打开 DSH 输出的 Web 地址，通常是
 正常情况下：
 
 1. 源消息先出现 `Get` 表情，回复表面创建成功后表情消失。
-2. 机器人为首条消息创建话题；`card` 模式下，话题中的 CardKit 卡片先展示分析状态和
-   `read`、`glob`、`grep` 等工具调用进度，再在下方独立流式呈现最终答案；Turn 完成后
-   执行过程自动折叠。
+2. 机器人为首条消息创建话题；`card` 模式下，话题中的 CardKit 卡片按事件顺序穿插展示
+   分析状态和 `read`、`glob`、`grep` 等工具调用进度，并在下方独立流式呈现最终答案。
+   默认 Turn 完成后折叠执行过程；可在设置中关闭。
 3. DSH Web UI 中出现一个标题以 `飞书 ·` 开头的新 Session。
 4. Session 继承 DSH 当前默认 Agent 配置，时间线中可以看到完整的真实工具调用与结果。
 5. DSH 完成 Turn 后，最终答案回复在同一话题下。
@@ -140,8 +140,9 @@ DSH 插件都已就绪。然后打开 DSH 输出的 Web 地址，通常是
 7. 点击 Web 页面右下角的“飞书用户授权”；授权页会显示需要登记的完整回调地址，
    确认飞书应用安全设置中已有该地址后完成 OAuth 授权。
 8. 打开 `Settings → Plugins → Plugin configuration`，展开“飞书桥接”即可编辑完整
-   插件配置。配置写入 DSH Settings，使用 revision 校验避免覆盖并发修改，并在重启
-   DSH 后生效。
+   插件配置。配置写入 DSH Settings，使用 revision 校验避免覆盖并发修改。展示与流式
+   参数立即用于新 Turn，正在运行的 Turn 保留启动时快照；连接、路由等结构参数会先
+   优雅关闭旧运行时再创建新运行时，均不需要重启 Web。
 9. 在 Web UI 中打开该 Session 并继续发送消息，原飞书话题会以本人身份显示用户
    输入；如果授权尚未完成或已经失效，则显示机器人发送的引用格式，并继续正常执行。
 10. 保持 `enableQuestions=true` 和 `enableCardKit=true` 后，Agent 发起
@@ -196,6 +197,11 @@ Agent 知道 DSH Session 的准确 Workspace 路径；询问“你的工作区�
 | `DSH_LARK_STREAM_PRINT_FREQUENCY_MS` | `number` | `70` | `40` | 打字机间隔；飞书 7.23 起生效 |
 | `DSH_LARK_STREAM_PRINT_STEP` | `number` | `1` | `2` | 每次显示的字符数 |
 | `DSH_LARK_STREAM_ELEMENT_MAX_CHARS` | `number` | `30000` | `20000` | 单个卡片组件的字符上限，超出后滚动到新组件 |
+| `DSH_LARK_TOOL_DETAIL_MODE` | `string` | `standard` | `detailed` | 工具详情：`hidden`、`compact`、`standard`、`detailed`；详细模式仍不展示原始参数、输出、文件内容或 diff 正文 |
+| `DSH_LARK_PROGRESS_STYLE` | `string` | `timeline` | `list` | 执行过程布局：`timeline`、`list` 或 `plain` |
+| `DSH_LARK_THINKING_ICON` | `string` | `brain` | `sparkles` | 思维步骤图标：`brain`、`sparkles`、`robot` 或 `none` |
+| `DSH_LARK_MAX_PROGRESS_ITEMS` | `number` | `100` | `50` | 单张卡片保留的执行过程条目上限，超出部分显示省略计数 |
+| `DSH_LARK_COLLAPSE_PROGRESS_ON_FINISH` | `string` | `1` | `0` | Turn 完成后是否折叠执行过程 |
 | `DSH_LARK_HTML_REPORTS_ENABLED` | `string` | `1` | `0` | 关闭 HTML 报告的本地托管与卡片按钮 |
 | `DSH_LARK_HTML_REPORT_ORIGIN` | `string` | 当前回环 Web Host | `http://192.168.1.10:3080` | 飞书客户端与 DSH 不同机时覆盖报告地址 |
 | `DSH_LARK_HTML_REPORT_TTL_MS` | `number` | `86400000`（24 小时） | `3600000` | 已托管报告的保留时长 |
@@ -241,8 +247,13 @@ DSH 配置面相同的安全约束，设置 API 仅在 Host 绑定 `127.0.0.1` �
 ```
 
 所以 `LARK_APP_SECRET=… dsh web` 的行为与以前完全一致；此时界面上的密钥输入框会禁用
-并标注“由环境变量提供”，尝试保存会返回 409。轮换密钥后插件会自动重连，无需重启 DSH。
-App ID 不是密钥，作为普通设置项 `appId` 保存。
+并标注“由环境变量提供”，尝试保存会返回 409。轮换密钥后插件会自动重建飞书运行时，
+无需重启 Web。App ID 不是密钥，作为普通设置项 `appId` 保存。
+
+执行过程的 `standard` 与 `detailed` 模式只消费 DSH Host 提供的 `ToolEventView` 展示数据。
+`detailed` 可以显示 Host 已批准的路径、工作目录、退出码和数量摘要，但不会读取或回显
+工具原始参数、终端输出、文件内容、搜索命中正文或 diff 正文。切换详情、布局、图标、
+条目上限、折叠策略和流式参数只影响之后打开的 Turn；正在运行的卡片不会在中途换样式。
 
 插件按话题调度消息：同一话题的消息按顺序执行，不同话题在
 `DSH_LARK_MAX_CONCURRENT_TOPICS` 上限内并行。关闭插件时，正在运行的 Turn 会收到取消

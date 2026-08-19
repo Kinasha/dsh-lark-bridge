@@ -5,6 +5,7 @@ import {
   name,
   normalizeConfig,
   replyModePolicy,
+  runtimeFeaturePolicy,
 } from "../src/plugin.js";
 
 test("plugin keeps its package name so DSH discovers its browser half", () => {
@@ -56,5 +57,64 @@ test("replyMode post disables both streaming reply tiers", () => {
       }),
     ),
     { enableCardKit: true, enableCot: true },
+  );
+});
+
+test("progress presentation settings expose validated modes and safe defaults", () => {
+  const defaults = Config({});
+  assert.equal(defaults.toolDetailMode, "standard");
+  assert.equal(defaults.progressStyle, "timeline");
+  assert.equal(defaults.thinkingIcon, "brain");
+  assert.equal(defaults.maxProgressItems, 100);
+  assert.equal(defaults.collapseProgressOnFinish, true);
+
+  assert.deepEqual(
+    normalizeConfig({
+      toolDetailMode: "detailed",
+      progressStyle: "plain",
+      thinkingIcon: "none",
+      maxProgressItems: 12,
+      collapseProgressOnFinish: false,
+    }),
+    {
+      ...normalizeConfig({}),
+      toolDetailMode: "detailed",
+      progressStyle: "plain",
+      thinkingIcon: "none",
+      maxProgressItems: 12,
+      collapseProgressOnFinish: false,
+    },
+  );
+  assert.throws(() => Config({ toolDetailMode: "raw" } as never));
+  assert.throws(() => Config({ maxProgressItems: 0 } as never));
+});
+
+test("event-stream dependent features honor their public switches", () => {
+  assert.deepEqual(runtimeFeaturePolicy(normalizeConfig({})), {
+    useEventStream: true,
+    enableQuestions: true,
+    enableCardActions: true,
+  });
+  assert.deepEqual(
+    runtimeFeaturePolicy(
+      normalizeConfig({
+        useEventStream: false,
+        enableQuestions: true,
+        enableCardActions: true,
+      }),
+    ),
+    {
+      useEventStream: false,
+      enableQuestions: false,
+      enableCardActions: false,
+    },
+  );
+  assert.deepEqual(
+    runtimeFeaturePolicy(normalizeConfig({ enableCardActions: false })),
+    {
+      useEventStream: true,
+      enableQuestions: true,
+      enableCardActions: false,
+    },
   );
 });

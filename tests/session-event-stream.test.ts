@@ -148,6 +148,42 @@ test("narrows each wire frame and rejects malformed ones", () => {
   }
 });
 
+test("a mux session event retains the host-computed tool presentation view", () => {
+  const view = {
+    for: "call",
+    view: {
+      card: "generic",
+      title: "Read src/plugin.ts",
+      kind: "read",
+      locations: [{ path: "src/plugin.ts", line: 88 }],
+    },
+  };
+  assert.deepEqual(
+    narrowMuxFrame("r-view", {
+      type: "session/event",
+      sessionId: "s1",
+      event: {
+        type: "tool/call",
+        seq: 4,
+        time: 10,
+        data: { callId: "call-1", name: "read", arguments: "{}" },
+      },
+      view,
+    }),
+    {
+      type: "session/event",
+      sessionId: "s1",
+      event: {
+        type: "tool/call",
+        seq: 4,
+        time: 10,
+        data: { callId: "call-1", name: "read", arguments: "{}" },
+        view,
+      },
+    },
+  );
+});
+
 test("demultiplexes frames to the subscriber for that session", async () => {
   const wire: Wire = {
     frames: [[frame("s1", event(1, "turn/start")), frame("s2", event(1, "turn/start"))]],
