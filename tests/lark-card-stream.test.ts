@@ -9,6 +9,7 @@ import {
   EMPTY_BODY_TEXT,
   splitForRollover,
   STEPS_ELEMENT_ID,
+  STEPS_PANEL_ELEMENT_ID,
   STOP_BUTTON_ELEMENT_ID,
 } from "../src/lark-card-stream.js";
 import type { CardElement } from "../src/lark-card.js";
@@ -18,7 +19,7 @@ type Recorded =
   | { op: "content"; elementId: string; content: string }
   | { op: "append"; position: string; targetElementId?: string; elements: readonly CardElement[] }
   | { op: "replace"; elementId: string; element: CardElement }
-  | { op: "patch"; elementId: string }
+  | { op: "patch"; elementId: string; partial: Record<string, unknown> }
   | { op: "delete"; elementId: string }
   | { op: "settings"; settings: unknown }
   | { op: "batch"; actions: readonly CardKitAction[] };
@@ -43,8 +44,8 @@ function fakeHandle(): { handle: CardKitCardHandle; calls: Recorded[] } {
     replaceElement: async (elementId, element) => {
       calls.push({ op: "replace", elementId, element });
     },
-    patchElement: async (elementId) => {
-      calls.push({ op: "patch", elementId });
+    patchElement: async (elementId, partial) => {
+      calls.push({ op: "patch", elementId, partial });
     },
     deleteElement: async (elementId) => {
       calls.push({ op: "delete", elementId });
@@ -79,15 +80,92 @@ test("builds a streaming card that satisfies the 2.0 contract", () => {
   assert.ok(card.config.summary?.content, "old clients show the summary instead");
 
   const ids = card.body.elements.map((element) => element.element_id);
-  assert.deepEqual(ids, [BODY_ELEMENT_ID, "dsh_steps", ACTIONS_ELEMENT_ID]);
+  assert.deepEqual(ids, [STEPS_PANEL_ELEMENT_ID, BODY_ELEMENT_ID, ACTIONS_ELEMENT_ID]);
+  assert.equal(
+    (card.body.elements[0] as { expanded?: boolean }).expanded,
+    true,
+    "progress is visible while the turn runs",
+  );
 });
 
 test("omits the action row when no stop behavior is supplied", () => {
   const card = buildStreamingCard();
   assert.deepEqual(
     card.body.elements.map((element) => element.element_id),
-    [BODY_ELEMENT_ID, "dsh_steps"],
+    [STEPS_PANEL_ELEMENT_ID, BODY_ELEMENT_ID],
   );
+});
+
+test("interleaved progress and answer updates stay independent and collapse at the end", async () => {
+  const { handle, calls } = fakeHandle();
+  const session = new CardReplySession(handle);
+
+  await session.pushSteps("- 正在分析\n");
+  await session.pushBody("第一段\n");
+  await session.pushSteps("- 正在分析\n- 调用 read\n");
+  await session.pushBody("第一段\n第二段\n");
+  await session.finalize({ outcome: "done", text: "第一段\n第二段\n" });
+
+  const updates = calls.filter(
+    (call): call is Extract<Recorded, { op: "content" }> => call.op === "content",
+  );
+  assert.deepEqual(
+    updates.map(({ elementId, content }) => [elementId, content]),
+    [
+      [STEPS_ELEMENT_ID, "- 正在分析\n"],
+      [BODY_ELEMENT_ID, "第一段\n"],
+      [STEPS_ELEMENT_ID, "- 正在分析\n- 调用 read\n"],
+      [BODY_ELEMENT_ID, "第一段\n第二段\n"],
+    ],
+  );
+  const settings = calls.findIndex((call) => call.op === "settings");
+  const collapse = calls.findIndex(
+    (call) =>
+      call.op === "patch" && call.elementId === STEPS_PANEL_ELEMENT_ID,
+  );
+  assert.ok(settings >= 0 && settings < collapse, "streaming closes before the panel collapses");
+  assert.deepEqual(
+    calls[collapse],
+    {
+      op: "patch",
+      elementId: STEPS_PANEL_ELEMENT_ID,
+      partial: { expanded: false },
+    },
+  );
+});
+
+test("a failed final collapse does not lose the answer or terminal buttons", async () => {
+  const { handle, calls } = fakeHandle();
+  const warnings: string[] = [];
+  const session = new CardReplySession(
+    {
+      ...handle,
+      patchElement: async () => {
+        throw new Error("collapse rejected");
+      },
+    },
+    {
+      logger: {
+        info: () => undefined,
+        warn: (event) => warnings.push(event),
+        error: () => undefined,
+      },
+      terminalButtons: [
+        {
+          elementId: "dsh_retry",
+          text: "重试",
+          behaviors: [{ type: "callback", value: { a: "retry" } }],
+        },
+      ],
+    },
+  );
+
+  await session.finalize({ outcome: "done", text: "最终答案" });
+
+  assert.equal(bodyPushes(calls).at(-1), "最终答案");
+  assert.ok(calls.some((call) => call.op === "settings"));
+  assert.ok(calls.some((call) => call.op === "replace"));
+  assert.deepEqual(warnings, ["card_steps_collapse_failed"]);
 });
 
 test("commits only whole lines outside an open code fence", () => {
@@ -161,6 +239,25 @@ test("rolls over into a new component and reopens an open code fence", async () 
   assert.ok(tail.startsWith("```js"), "the new component reopens the same fence");
 });
 
+test("keeps streaming after one large fenced chunk rolls over repeatedly", async () => {
+  const { handle, calls } = fakeHandle();
+  const session = new CardReplySession(handle, { elementMaxChars: 60 });
+  const first = `\`\`\`ts\n${"const value = 1;\n".repeat(12)}\`\`\`\n`;
+
+  await session.pushBody(first);
+  const before = calls.filter((call) => call.op === "content").length;
+  await session.pushBody(`${first}继续输出\n`);
+
+  const pushes = calls.filter(
+    (call): call is Extract<Recorded, { op: "content" }> => call.op === "content",
+  );
+  assert.ok(pushes.length > before, "the next accumulated chunk is still published");
+  assert.ok(
+    pushes.at(-1)?.content.endsWith("继续输出\n"),
+    "the active component receives the new suffix",
+  );
+});
+
 test("stops rolling over near the component ceiling and truncates instead", async () => {
   const { handle, calls } = fakeHandle();
   const session = new CardReplySession(
@@ -230,8 +327,8 @@ test("finalize closes streaming even when the last content push fails", async ()
   await assert.rejects(session.finalize({ outcome: "error", text: "boom" }));
   assert.deepEqual(
     calls.map((call) => call.op),
-    ["settings", "replace"],
-    "streaming is closed and buttons installed despite the failure",
+    ["settings", "patch", "replace"],
+    "streaming is closed, progress collapses, and buttons install despite the failure",
   );
 });
 
@@ -288,7 +385,7 @@ test("sanitizes streamed content and skips no-op pushes", async () => {
 
 test("removes an approval block by id", async () => {
   const { handle, calls } = fakeHandle();
-  const session = new CardReplySession(handle);
+  const session = new CardReplySession(handle, { hasActionRow: true });
   await session.insertBlock([{ tag: "hr", element_id: "dsh_ap1" }]);
   await session.removeBlock("dsh_ap1");
 
@@ -300,5 +397,33 @@ test("removes an approval block by id", async () => {
   assert.deepEqual(
     calls.filter((call) => call.op === "delete").map((call) => call.elementId),
     ["dsh_ap1"],
+  );
+});
+
+test("appends a question block when the card has no action row", async () => {
+  const { handle, calls } = fakeHandle();
+  const session = new CardReplySession(handle, { hasActionRow: false });
+
+  await session.insertBlock([{ tag: "hr", element_id: "dsh_question" }]);
+
+  const append = calls.find(
+    (call): call is Extract<Recorded, { op: "append" }> => call.op === "append",
+  );
+  assert.equal(append?.position, "append");
+  assert.equal(append?.targetElementId, undefined);
+});
+
+test("question cleanup still runs if the turn finalizes immediately after answering", async () => {
+  const { handle, calls } = fakeHandle();
+  const session = new CardReplySession(handle);
+  await session.insertBlock([{ tag: "hr", element_id: "dsh_question" }]);
+  await session.finalize({ outcome: "done", text: "完成" });
+
+  await session.removeBlocks(["dsh_question"]);
+
+  assert.ok(
+    calls.some(
+      (call) => call.op === "delete" && call.elementId === "dsh_question",
+    ),
   );
 });

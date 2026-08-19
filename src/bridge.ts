@@ -88,6 +88,8 @@ export interface BridgeOptions {
   allowSlashCommands?: boolean;
   /** Present answerable DSH questions in the active CardKit reply. */
   enableQuestions?: boolean;
+  /** Mirror Web-originated progress through Feishu COT. */
+  enableWebCot?: boolean;
   questionAnswers?: {
     answerText(input: {
       eventId: string;
@@ -95,7 +97,10 @@ export interface BridgeOptions {
       senderOpenId: string;
       text: string;
     }): Promise<boolean>;
-    resolve?(sessionId: string, questionRpcId: string): void;
+    resolve?(
+      sessionId: string,
+      questionRpcId: string,
+    ): void | Promise<void>;
   };
 }
 
@@ -238,6 +243,7 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
     options.client,
     options.lark,
     logger,
+    options.enableWebCot ?? true,
   );
   let storedTopicLinks: LarkTopicLink[] = [];
   try {
@@ -468,9 +474,9 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
                     });
                   }
                 },
-                onResolved: (event) => {
+                onResolved: async (event) => {
                   if (event.type === "question/resolved") {
-                    options.questionAnswers?.resolve?.(
+                    await options.questionAnswers?.resolve?.(
                       event.sessionId,
                       event.questionRpcId,
                     );

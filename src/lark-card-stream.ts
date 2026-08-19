@@ -66,6 +66,8 @@ export interface CardStreamOptions {
   logger?: SemanticLogger;
   elementMaxChars?: number;
   maxElements?: number;
+  /** Whether blocks can be inserted before the card's action row. */
+  hasActionRow?: boolean;
   /** Terminal buttons installed once streaming has been closed. */
   terminalButtons?: readonly TerminalCardButton[];
 }
@@ -85,13 +87,13 @@ export interface StreamingCardInput {
  */
 export function buildStreamingCard(input: StreamingCardInput = {}): Card2 {
   const elements: CardElement[] = [
-    markdownElement(INITIAL_BODY_TEXT, { elementId: BODY_ELEMENT_ID }),
     collapsiblePanel({
       elementId: STEPS_PANEL_ELEMENT_ID,
       title: "**执行过程**",
-      expanded: false,
+      expanded: true,
       elements: [markdownElement("", { elementId: STEPS_ELEMENT_ID })],
     }),
+    markdownElement(INITIAL_BODY_TEXT, { elementId: BODY_ELEMENT_ID }),
   ];
   if (input.stopBehaviors !== undefined) {
     elements.push(
@@ -188,6 +190,9 @@ export class CardReplySession {
   private bodyElementId = BODY_ELEMENT_ID;
   private bodyIndex = 1;
   private bodyPublished = "";
+  /** Synthetic fence reopened at the start of the active component. */
+  private bodyPrefix = "";
+  /** Original sanitized text frozen into completed components. */
   private bodyCarried = "";
   private stepsPublished = "";
   private elementCount: number;
@@ -195,7 +200,10 @@ export class CardReplySession {
   private streamingClosed = false;
   private finalized = false;
   private readonly options: Required<
-    Pick<CardStreamOptions, "logger" | "elementMaxChars" | "maxElements">
+    Pick<
+      CardStreamOptions,
+      "logger" | "elementMaxChars" | "maxElements" | "hasActionRow"
+    >
   > & { terminalButtons: readonly TerminalCardButton[] };
 
   constructor(
@@ -210,6 +218,7 @@ export class CardReplySession {
         STREAM_ELEMENT_HARD_MAX_CHARS,
       ),
       maxElements: options.maxElements ?? CARD_MAX_ELEMENTS,
+      hasActionRow: options.hasActionRow ?? false,
       terminalButtons: options.terminalButtons ?? [],
     };
     this.elementCount = initialElementCount;
@@ -240,11 +249,15 @@ export class CardReplySession {
   /** Inserts an approval or question block just above the action row. */
   async insertBlock(elements: readonly CardElement[]): Promise<void> {
     if (this.finalized || elements.length === 0) return;
-    await this.handle.appendElements({
-      position: "insert_before",
-      targetElementId: ACTIONS_ELEMENT_ID,
-      elements,
-    });
+    await this.handle.appendElements(
+      this.options.hasActionRow
+        ? {
+            position: "insert_before",
+            targetElementId: ACTIONS_ELEMENT_ID,
+            elements,
+          }
+        : { position: "append", elements },
+    );
     this.elementCount += elements.length;
   }
 
@@ -252,6 +265,13 @@ export class CardReplySession {
     if (this.finalized) return;
     await this.handle.deleteElement(elementId);
     this.elementCount = Math.max(0, this.elementCount - 1);
+  }
+
+  async removeBlocks(elementIds: readonly string[]): Promise<void> {
+    for (const elementId of elementIds) {
+      await this.handle.deleteElement(elementId);
+      this.elementCount = Math.max(0, this.elementCount - 1);
+    }
   }
 
   /**
@@ -276,6 +296,7 @@ export class CardReplySession {
       }
     } finally {
       await this.closeStreaming(input.summary ?? statusSummary(input.outcome));
+      await this.collapseSteps();
       await this.installTerminalButtons(input.terminalButtons);
     }
   }
@@ -286,6 +307,17 @@ export class CardReplySession {
     await this.handle.patchSettings({
       config: { streaming_mode: false, summary: { content: summary } },
     });
+  }
+
+  private async collapseSteps(): Promise<void> {
+    try {
+      await this.handle.patchElement(STEPS_PANEL_ELEMENT_ID, { expanded: false });
+    } catch (error) {
+      this.options.logger.warn("card_steps_collapse_failed", {
+        cardId: this.cardId,
+        errorName: error instanceof Error ? error.name : typeof error,
+      });
+    }
   }
 
   private async installTerminalButtons(
@@ -323,25 +355,32 @@ export class CardReplySession {
     if (!rendered.startsWith(this.bodyCarried)) {
       if (options?.final !== true) return;
       this.bodyCarried = "";
+      this.bodyPrefix = "";
       this.bodyPublished = "";
     }
     let pending = rendered.slice(this.bodyCarried.length);
 
-    while (pending.length > this.options.elementMaxChars) {
+    while (this.bodyPrefix.length + pending.length > this.options.elementMaxChars) {
       if (!this.canRollOver()) {
-        pending = this.applyTruncation(pending);
+        pending = this.applyTruncation(`${this.bodyPrefix}${pending}`);
+        this.bodyPrefix = "";
         break;
       }
-      const { head, tail } = splitForRollover(pending, this.options.elementMaxChars);
+      const { head } = splitForRollover(
+        `${this.bodyPrefix}${pending}`,
+        this.options.elementMaxChars,
+      );
+      const consumed = head.length - this.bodyPrefix.length;
       const fence = openFence(head);
       const closedHead = fence === undefined ? head : `${head}\n${fence[0]?.repeat(3) ?? "```"}\n`;
       await this.writeBody(closedHead);
-      this.bodyCarried += head;
+      this.bodyCarried += pending.slice(0, consumed);
+      pending = pending.slice(consumed);
       await this.openNextBodyElement();
-      pending = fence === undefined ? tail : `${fence}\n${tail}`;
+      this.bodyPrefix = fence === undefined ? "" : `${fence}\n`;
     }
 
-    await this.writeBody(pending);
+    await this.writeBody(`${this.bodyPrefix}${pending}`);
   }
 
   private applyTruncation(pending: string): string {

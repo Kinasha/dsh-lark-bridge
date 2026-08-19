@@ -174,6 +174,22 @@ export interface CardButtonElement {
   behaviors: CardBehavior[];
 }
 
+export interface CardInputElement {
+  tag: "input";
+  element_id?: string;
+  name?: string;
+  placeholder?: CardTextObject;
+  width?: "default" | "fill" | string;
+  behaviors?: CardBehavior[];
+  max_length?: number;
+  input_type?: "text" | "multiline_text" | "password";
+  rows?: number;
+  auto_resize?: boolean;
+  max_rows?: number;
+  label?: CardTextObject;
+  label_position?: "top" | "left";
+}
+
 export type CardElement =
   | CardMarkdownElement
   | CardHrElement
@@ -181,7 +197,8 @@ export type CardElement =
   | CardTableElement
   | CardCollapsiblePanelElement
   | CardColumnSetElement
-  | CardButtonElement;
+  | CardButtonElement
+  | CardInputElement;
 
 export interface CardStreamingConfig {
   print_frequency_ms?: { default: number; android?: number; ios?: number; pc?: number };
@@ -436,6 +453,31 @@ export function buttonElement(input: {
     behaviors: input.behaviors,
     ...(input.type === undefined ? {} : { type: input.type }),
     ...(input.size === undefined ? {} : { size: input.size }),
+  };
+}
+
+export function inputElement(input: {
+  elementId: string;
+  name: string;
+  placeholder: string;
+  behaviors: CardBehavior[];
+  label?: string;
+}): CardInputElement {
+  return {
+    tag: "input",
+    element_id: assertCardElementId(input.elementId),
+    name: input.name,
+    placeholder: { tag: "plain_text", content: input.placeholder },
+    width: "fill",
+    behaviors: input.behaviors,
+    max_length: 1_000,
+    input_type: "multiline_text",
+    rows: 2,
+    auto_resize: true,
+    max_rows: 5,
+    ...(input.label === undefined
+      ? {}
+      : { label: { tag: "plain_text" as const, content: input.label } }),
   };
 }
 

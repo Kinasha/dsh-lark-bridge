@@ -17,13 +17,17 @@ const SESSION = "lark-session";
 const OWNER = "ou_owner";
 const MESSAGE = "om_card";
 
-function callback(value: unknown) {
+function callback(value: unknown, inputValue?: string) {
   return {
     schema: "2.0",
     header: { event_type: "card.action.trigger" },
     event: {
       operator: { open_id: OWNER },
-      action: { tag: "button", value },
+      action: {
+        tag: inputValue === undefined ? "button" : "input",
+        value,
+        ...(inputValue === undefined ? {} : { input_value: inputValue }),
+      },
       context: { open_message_id: MESSAGE, open_chat_id: "oc_chat" },
     },
   };
@@ -69,6 +73,7 @@ test("a Feishu question button answers the matching DSH AskUserQuestion request"
     ownerOpenId: OWNER,
   });
   const questions = new LarkQuestionController({ stream, registry });
+  let cleanups = 0;
   const unsupported = async (): Promise<void> => {
     throw new Error("unsupported action");
   };
@@ -92,6 +97,13 @@ test("a Feishu question button answers the matching DSH AskUserQuestion request"
       },
     ],
   });
+  questions.bindQuestionCleanup({
+    sessionId: SESSION,
+    questionRpcId: "rpc-question-1",
+    cleanup: async () => {
+      cleanups += 1;
+    },
+  });
   const values = callbackValues(elements);
 
   assert.equal(values.length, 2);
@@ -111,6 +123,77 @@ test("a Feishu question button answers the matching DSH AskUserQuestion request"
       },
     },
   ]);
+  assert.equal(cleanups, 1, "the answered question is removed from Feishu");
+});
+
+test("an AskUserQuestion with choices also accepts custom card input", async () => {
+  const responses: ClientResponseMessage[] = [];
+  const stream = new SessionEventStream({
+    events: { mux: async function* () { await Promise.resolve(); } },
+    respond: async (message) => {
+      responses.push(message);
+      return { accepted: true };
+    },
+  });
+  const registry = new CardActionRegistry({ newNonce: () => "custom-nonce" });
+  registry.bind({
+    sessionId: SESSION,
+    cardId: "card-1",
+    messageId: MESSAGE,
+    chatId: "oc_chat",
+    topicRootMessageId: "om_root",
+    ownerOpenId: OWNER,
+  });
+  const questions = new LarkQuestionController({ stream, registry });
+  const unsupported = async (): Promise<void> => {
+    throw new Error("unsupported action");
+  };
+  const router = new CardActionRouter({
+    registry,
+    effects: {
+      stop: unsupported,
+      retry: unsupported,
+      newTopic: unsupported,
+      approve: unsupported,
+      answer: (input) => questions.answerOption(input),
+    },
+  });
+  const elements = questions.present({
+    type: "question/requested",
+    rpcId: "rpc-custom",
+    sessionId: SESSION,
+    questions: [
+      {
+        id: "task",
+        question: "你想让我做什么？",
+        options: [{ label: "探索" }, { label: "写代码" }],
+      },
+    ],
+  });
+  const input = elements.find((element) => element.tag === "input") as
+    | (CardElement & { behaviors?: Array<{ type: string; value: unknown }> })
+    | undefined;
+  const customValue = input?.behaviors?.find(
+    (behavior) => behavior.type === "callback",
+  )?.value;
+
+  assert.ok(customValue, "the choices include a custom input callback");
+  const response = await router.handle(callback(customValue, "先检查线上日志"));
+
+  assert.deepEqual(response.toast, { type: "success", content: "已回答" });
+  assert.deepEqual(responses[0], {
+    type: "client-response",
+    rpcId: "rpc-custom",
+    result: {
+      ok: true,
+      value: {
+        sessionId: SESSION,
+        answer: {
+          answers: [{ id: "task", selected: [], custom: "先检查线上日志" }],
+        },
+      },
+    },
+  });
 });
 
 test("a direct Feishu topic reply answers a free-text AskUserQuestion", async () => {
@@ -183,6 +266,33 @@ test("a direct Feishu topic reply answers a free-text AskUserQuestion", async ()
     true,
     "a duplicate delivery stays consumed instead of becoming a new prompt",
   );
+});
+
+test("a question answered from Web also cleans up its Feishu surface", async () => {
+  const stream = new SessionEventStream({
+    events: { mux: async function* () { await Promise.resolve(); } },
+    respond: async () => ({ accepted: true }),
+  });
+  const registry = new CardActionRegistry();
+  const questions = new LarkQuestionController({ stream, registry });
+  let cleanups = 0;
+  questions.present({
+    type: "question/requested",
+    rpcId: "rpc-web-answer",
+    sessionId: SESSION,
+    questions: [{ id: "answer", question: "继续吗？" }],
+  });
+  questions.bindQuestionCleanup({
+    sessionId: SESSION,
+    questionRpcId: "rpc-web-answer",
+    cleanup: async () => {
+      cleanups += 1;
+    },
+  });
+
+  await questions.resolve(SESSION, "rpc-web-answer");
+
+  assert.equal(cleanups, 1);
 });
 
 test("a multi-select question waits for submit and preserves every selection", async () => {

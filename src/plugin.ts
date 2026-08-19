@@ -30,6 +30,7 @@ import type { SemanticLogger } from "./logger.js";
 import {
   Config,
   normalizeConfig,
+  replyModePolicy,
   type NormalizedLarkConfig,
 } from "./lark-config.js";
 import {
@@ -61,7 +62,7 @@ export const inject = {
 };
 export const LARK_SETTINGS_NAMESPACE = "dsh-lark-bridge" as SettingsNamespace;
 
-export { Config, normalizeConfig };
+export { Config, normalizeConfig, replyModePolicy };
 export type { NormalizedLarkConfig };
 
 /**
@@ -195,6 +196,7 @@ export async function apply(ctx: Context, input: Config): Promise<void> {
   const questions = new LarkQuestionController({
     stream: eventStream,
     registry: cardActions,
+    logger: semanticLogger,
   });
   const unsupportedCardAction = async (): Promise<void> => {
     throw new Error("card action is not enabled by this bridge");
@@ -273,18 +275,20 @@ export async function apply(ctx: Context, input: Config): Promise<void> {
       retentionMs: config.eventRetentionMs,
     },
   );
-  // The card tier is opt-in for one release: `replyMode` defaults to "post".
-  const cardKitEnabled = config.replyMode === "card" && config.enableCardKit;
+  // `post` is a strict single-surface mode; CardKit and COT are card-mode tiers.
+  const replyPolicy = replyModePolicy(config);
+  const cardKitGateway =
+    config.enableCardKit && (replyPolicy.enableCardKit || config.enableQuestions)
+      ? new LarkCardKitGateway(apiClient, { logger: semanticLogger })
+      : undefined;
   const replyChannel = new LarkReplyChannel({
     transport: transport,
-    ...(cardKitEnabled
-      ? { cardkit: new LarkCardKitGateway(apiClient, { logger: semanticLogger }) }
-      : {}),
+    ...(cardKitGateway === undefined ? {} : { cardkit: cardKitGateway }),
     logger: semanticLogger,
     ...(config.enableQuestions ? { buttons: questions } : {}),
     config: {
-      enableCardKit: cardKitEnabled,
-      enableCot: config.enableCot,
+      enableCardKit: replyPolicy.enableCardKit,
+      enableCot: replyPolicy.enableCot,
       alwaysPostFinal: config.alwaysPostFinal,
       printFrequencyMs: config.streamPrintFrequencyMs,
       printStep: config.streamPrintStep,
@@ -323,6 +327,7 @@ export async function apply(ctx: Context, input: Config): Promise<void> {
         replyChannel,
         allowSlashCommands: config.allowSlashCommands,
         enableQuestions: config.enableQuestions,
+        enableWebCot: replyPolicy.enableCot,
         ...(config.enableQuestions ? { questionAnswers: questions } : {}),
         signal,
         workspacePath: config.workspacePath,

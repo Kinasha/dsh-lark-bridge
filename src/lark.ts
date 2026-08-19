@@ -105,6 +105,9 @@ export interface LarkApiClientPort {
       }): Promise<{ image_key?: string | undefined } | null>;
     };
     message: {
+      delete?(input: {
+        path: { message_id: string };
+      }): Promise<LarkMessageResponse>;
       reply(input: {
         path: { message_id: string };
         data: {
@@ -161,6 +164,7 @@ export interface LarkMessageTransport {
     uuid: string;
     replyInThread: boolean;
   }): Promise<LarkReplyResult>;
+  deleteMessage?(messageId: string): Promise<void>;
 }
 
 export interface LarkSdkTransportOptions {
@@ -529,6 +533,19 @@ export class LarkSdkTransport implements LarkMessageTransport {
       },
     });
     return replyResult(response, "card message");
+  }
+
+  async deleteMessage(messageId: string): Promise<void> {
+    const remove = this.apiClient.im.message.delete;
+    if (remove === undefined) {
+      throw new Error("Lark message delete API is unavailable");
+    }
+    const response = await remove({ path: { message_id: messageId } });
+    if (response.code !== undefined && response.code !== 0) {
+      throw new Error(
+        `Lark message delete failed: ${response.msg ?? response.code}`,
+      );
+    }
   }
 
   async replyToMessageAsUser(

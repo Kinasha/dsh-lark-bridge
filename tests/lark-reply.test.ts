@@ -26,9 +26,21 @@ const ROUTE: ReplyRoute = {
   replyInThread: true,
 };
 
+const EXISTING_TOPIC_ROUTE: ReplyRoute = {
+  ...ROUTE,
+  sourceMessageId: "om_followup",
+  replyInThread: false,
+};
+
 interface Journal {
   posts: string[];
-  cards: { content: string; uuid: string }[];
+  deletedMessages: string[];
+  cards: {
+    content: string;
+    uuid: string;
+    route: { sourceMessageId: string; topicRootMessageId: string };
+    replyInThread: boolean;
+  }[];
   cots: number;
   cotCompleted: string[];
   cardOps: { operation: string; data: Record<string, unknown> }[];
@@ -48,13 +60,16 @@ function harness(options?: {
   cardCreateError?: CardKitError;
   cardContentError?: CardKitError;
   cotError?: Error;
+  deleteMessageError?: Error;
   withCardKit?: boolean;
   withCot?: boolean;
   buttons?: ReplyButtonProvider;
   alwaysPostFinal?: boolean;
+  enableCardKit?: boolean;
 }): { channel: LarkReplyChannel; journal: Journal } {
   const journal: Journal = {
     posts: [],
+    deletedMessages: [],
     cards: [],
     cots: 0,
     cotCompleted: [],
@@ -102,11 +117,22 @@ function harness(options?: {
       journal.posts.push(text);
       return { messageId: `om_post_${journal.posts.length}` };
     },
+    deleteMessage: async (messageId) => {
+      if (options?.deleteMessageError !== undefined) {
+        throw options.deleteMessageError;
+      }
+      journal.deletedMessages.push(messageId);
+    },
     ...(options?.withCardKit === false
       ? {}
       : {
           replyWithCard: async (input) => {
-            journal.cards.push({ content: input.content, uuid: input.uuid });
+            journal.cards.push({
+              content: input.content,
+              uuid: input.uuid,
+              route: input.route,
+              replyInThread: input.replyInThread,
+            });
             return { messageId: "om_card" };
           },
         }),
@@ -138,6 +164,9 @@ function harness(options?: {
         }),
     buttons: options?.buttons ?? NO_BUTTONS,
     config: {
+      ...(options?.enableCardKit === undefined
+        ? {}
+        : { enableCardKit: options.enableCardKit }),
       ...(options?.alwaysPostFinal === undefined
         ? {}
         : { alwaysPostFinal: options.alwaysPostFinal }),
@@ -146,9 +175,9 @@ function harness(options?: {
   return { channel, journal };
 }
 
-function open(channel: LarkReplyChannel) {
+function open(channel: LarkReplyChannel, route: ReplyRoute = ROUTE) {
   return channel.open({
-    route: ROUTE,
+    route,
     sessionId: "lark-abc",
     query: "你好",
     runId: "evt_1",
@@ -178,6 +207,11 @@ test("prefers the card tier and delivers the answer in the card", async () => {
   });
   assert.equal(journal.posts.length, 0, "no separate post reply");
   assert.equal(journal.cards.length, 1);
+  assert.deepEqual(journal.cards[0]?.route, {
+    sourceMessageId: "om_src",
+    topicRootMessageId: "om_root",
+  });
+  assert.equal(journal.cards[0]?.replyInThread, true);
   assert.deepEqual(JSON.parse(journal.cards[0]?.content ?? "{}"), {
     type: "card",
     data: { card_id: "card_1" },
@@ -190,20 +224,20 @@ test("prefers the card tier and delivers the answer in the card", async () => {
   assert.ok(settingsIndex > operations.indexOf("cardElement.content"));
 });
 
-test("falls back to COT when CardKit is unavailable, then posts the answer", async () => {
+test("falls back directly to an in-thread post when CardKit cannot create a topic reply", async () => {
   const { channel, journal } = harness({
     cardCreateError: new CardKitError("no scope", 99991672, "card.create"),
   });
 
   const session = await open(channel);
-  assert.equal(session.tier, "cot");
+  assert.equal(session.tier, "post");
   await session.present(EVENTS);
   const delivery = await session.finalize({ outcome: "done", text: "最终答案" });
 
-  assert.equal(delivery.tier, "cot");
+  assert.equal(delivery.tier, "post");
   assert.equal(delivery.delivered, true);
-  assert.equal(journal.cots, 1);
-  assert.deepEqual(journal.cotCompleted, ["done"]);
+  assert.equal(journal.cots, 0, "a top-level COT cannot enter the new topic");
+  assert.deepEqual(journal.cotCompleted, []);
   assert.deepEqual(journal.posts, ["最终答案"], "exactly one final answer");
 });
 
@@ -230,10 +264,10 @@ test("probes COT once per process too", async () => {
   });
   assert.equal(channel.preferredTier, "cot");
 
-  const first = await open(channel);
+  const first = await open(channel, EXISTING_TOPIC_ROUTE);
   assert.equal(first.tier, "post");
   await first.finalize({ outcome: "done", text: "a" });
-  const second = await open(channel);
+  const second = await open(channel, EXISTING_TOPIC_ROUTE);
   await second.finalize({ outcome: "done", text: "b" });
 
   assert.equal(journal.cots, 0);
@@ -294,7 +328,7 @@ test("carries the turn outcome into the COT completion reason", async () => {
     ["done", "done"],
   ] as const) {
     const { channel, journal } = harness({ withCardKit: false });
-    const session = await open(channel);
+    const session = await open(channel, EXISTING_TOPIC_ROUTE);
     await session.finalize({ outcome, text: "x" });
     assert.deepEqual(journal.cotCompleted, [reason], outcome);
   }
@@ -370,6 +404,7 @@ test("installs terminal buttons supplied at finalize time", async () => {
 
 test("a card reply binds its owner and presents AskUserQuestion choices", async () => {
   const bindings: unknown[] = [];
+  let cleanup: (() => Promise<void>) | undefined;
   const request: Extract<MuxEvent, { type: "question/requested" }> = {
     type: "question/requested",
     rpcId: "rpc-question-1",
@@ -380,6 +415,9 @@ test("a card reply binds its owner and presents AskUserQuestion choices", async 
     stop: () => undefined,
     terminal: () => [],
     bindCard: (input: unknown) => bindings.push(input),
+    bindQuestionCleanup: (input: { cleanup: () => Promise<void> }) => {
+      cleanup = input.cleanup;
+    },
     question: () => [markdownElement("继续吗？", { elementId: "dsh_question" })],
   } as ReplyButtonProvider & {
     bindCard(input: unknown): void;
@@ -417,5 +455,125 @@ test("a card reply binds its owner and presents AskUserQuestion choices", async 
         operation.operation === "cardElement.create" &&
         JSON.stringify(operation.data).includes("继续吗"),
     ),
+  );
+  await cleanup?.();
+  assert.ok(
+    journal.cardOps.some(
+      (operation) =>
+        operation.operation === "cardElement.delete" &&
+        operation.data.uuid !== undefined,
+    ),
+    "answering removes the embedded question block",
+  );
+});
+
+test("a COT reply still presents AskUserQuestion in a Feishu card", async () => {
+  const bindings: unknown[] = [];
+  let cleanup: (() => Promise<void>) | undefined;
+  const request: Extract<MuxEvent, { type: "question/requested" }> = {
+    type: "question/requested",
+    rpcId: "rpc-question-cot",
+    sessionId: "lark-abc",
+    questions: [
+      {
+        id: "task",
+        question: "你想让我做什么？",
+        options: [{ label: "探索项目结构" }, { label: "写代码" }],
+      },
+    ],
+  };
+  const buttons = {
+    stop: () => undefined,
+    terminal: () => [],
+    bindCard: (input: unknown) => bindings.push(input),
+    bindQuestionCleanup: (input: { cleanup: () => Promise<void> }) => {
+      cleanup = input.cleanup;
+    },
+    question: () => [
+      markdownElement("你想让我做什么？", { elementId: "dsh_question" }),
+    ],
+  } as ReplyButtonProvider;
+  const { channel, journal } = harness({
+    buttons,
+    enableCardKit: false,
+  });
+
+  const session = await channel.open({
+    route: EXISTING_TOPIC_ROUTE,
+    sessionId: "lark-abc",
+    ownerOpenId: "ou_owner",
+    query: "调用 ask_user_question",
+    runId: "evt_cot_question",
+  });
+  assert.equal(session.tier, "cot");
+
+  const presented = await session.presentQuestion?.(request);
+
+  assert.equal(presented, true);
+  assert.equal(journal.cards.length, 1);
+  assert.ok(
+    journal.cardOps.some(
+      (operation) =>
+        operation.operation === "card.create" &&
+        JSON.stringify(operation.data).includes("你想让我做什么"),
+    ),
+  );
+  assert.deepEqual(bindings, [
+    {
+      sessionId: "lark-abc",
+      cardId: "card_1",
+      messageId: "om_card",
+      chatId: "oc_1",
+      topicRootMessageId: "om_root",
+      ownerOpenId: "ou_owner",
+    },
+  ]);
+  await cleanup?.();
+  assert.deepEqual(
+    journal.deletedMessages,
+    ["om_card"],
+    "the standalone question card is withdrawn after answering",
+  );
+});
+
+test("removes standalone question content when message withdrawal fails", async () => {
+  let cleanup: (() => Promise<void>) | undefined;
+  const buttons = {
+    stop: () => undefined,
+    terminal: () => [],
+    bindCard: () => undefined,
+    bindQuestionCleanup: (input: { cleanup: () => Promise<void> }) => {
+      cleanup = input.cleanup;
+    },
+    question: () => [
+      markdownElement("请输入答案", { elementId: "dsh_question" }),
+    ],
+  } as ReplyButtonProvider;
+  const { channel, journal } = harness({
+    buttons,
+    enableCardKit: false,
+    deleteMessageError: new Error("withdraw denied"),
+  });
+  const session = await channel.open({
+    route: ROUTE,
+    sessionId: "lark-cleanup",
+    ownerOpenId: "ou_owner",
+    query: "ask",
+    runId: "evt_cleanup",
+  });
+  const presented = await session.presentQuestion?.({
+    type: "question/requested",
+    rpcId: "rpc-cleanup",
+    sessionId: "lark-cleanup",
+    questions: [{ id: "answer", question: "请输入答案" }],
+  });
+
+  assert.equal(presented, true);
+  await cleanup?.();
+  assert.ok(
+    journal.cardOps.some(
+      (operation) => operation.operation === "cardElement.delete",
+    ),
+    "the question itself is removed even when the message cannot be withdrawn",
   );
 });

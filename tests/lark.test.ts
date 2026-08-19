@@ -290,6 +290,70 @@ test("replies with a Markdown post in the topic rooted at the inbound message", 
   });
 });
 
+test("replies with a CardKit entity in the topic rooted at the inbound message", async () => {
+  let replyInput:
+    | {
+        path: { message_id: string };
+        data: {
+          content: string;
+          msg_type: string;
+          uuid?: string;
+          reply_in_thread?: boolean;
+        };
+      }
+    | undefined;
+  const transport = new LarkSdkTransport({
+    credentials: { appId: "cli_test", appSecret: "secret" },
+    wsClient: {
+      start: async () => undefined,
+      close: () => undefined,
+      getConnectionStatus: () => ({ state: "connected" }),
+    },
+    apiClient: fakeApiClient((input) => {
+      replyInput = input;
+    }),
+  });
+
+  await transport.replyWithCard({
+    route: { sourceMessageId: "om_src", topicRootMessageId: "om_root" },
+    content: '{"type":"card","data":{"card_id":"card_1"}}',
+    uuid: "dsh-card-card_1",
+    replyInThread: true,
+  });
+
+  assert.deepEqual(replyInput, {
+    path: { message_id: "om_root" },
+    data: {
+      msg_type: "interactive",
+      content: '{"type":"card","data":{"card_id":"card_1"}}',
+      uuid: "dsh-card-card_1",
+      reply_in_thread: true,
+    },
+  });
+});
+
+test("withdraws a standalone question card by its message id", async () => {
+  const client = fakeApiClient();
+  let deletedMessageId: string | undefined;
+  client.im.message.delete = async (input) => {
+    deletedMessageId = input.path.message_id;
+    return { code: 0 };
+  };
+  const transport = new LarkSdkTransport({
+    credentials: { appId: "cli_test", appSecret: "secret" },
+    wsClient: {
+      start: async () => undefined,
+      close: () => undefined,
+      getConnectionStatus: () => ({ state: "connected" }),
+    },
+    apiClient: client,
+  });
+
+  await transport.deleteMessage("om_question");
+
+  assert.equal(deletedMessageId, "om_question");
+});
+
 test("uploads a rendered Mermaid PNG and embeds its image key", async () => {
   let replyContent = "";
   let uploadedPng: Buffer | undefined;

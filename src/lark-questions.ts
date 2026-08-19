@@ -1,6 +1,7 @@
 import {
   buttonElement,
   buttonRow,
+  inputElement,
   markdownElement,
   sanitizeCardMarkdown,
   type CardElement,
@@ -16,6 +17,7 @@ import type {
   SessionEventStream,
 } from "./session-event-stream.js";
 import type { ReplyButtonProvider } from "./lark-reply.js";
+import { silentLogger, type SemanticLogger } from "./logger.js";
 
 type QuestionRequest = Extract<MuxEvent, { type: "question/requested" }>;
 
@@ -24,19 +26,22 @@ interface PendingQuestionRequest {
   answers: Map<string, { id: string; selected: string[]; custom?: string }>;
   multiSelections: Map<string, string[]>;
   generation: number;
+  cleanup?: () => Promise<void>;
 }
 
 export interface LarkQuestionControllerOptions {
   stream: Pick<SessionEventStream, "answer">;
   registry: CardActionRegistry;
+  logger?: SemanticLogger;
 }
 
 export interface LarkQuestionOptionAnswer {
   sessionId: string;
   questionRpcId: string;
   questionId: string;
-  mode: "single" | "multi-select" | "multi-submit";
+  mode: "single" | "custom" | "multi-select" | "multi-submit";
   selected?: string;
+  custom?: string;
   binding: CardActionBinding;
 }
 
@@ -75,8 +80,11 @@ export class LarkQuestionController implements ReplyButtonProvider {
   private readonly pending = new Map<string, PendingQuestionRequest>();
   private readonly consumedEventIds = new Set<string>();
   private generation = 0;
+  private readonly logger: SemanticLogger;
 
-  constructor(private readonly options: LarkQuestionControllerOptions) {}
+  constructor(private readonly options: LarkQuestionControllerOptions) {
+    this.logger = options.logger ?? silentLogger;
+  }
 
   stop(): undefined {
     return undefined;
@@ -106,6 +114,17 @@ export class LarkQuestionController implements ReplyButtonProvider {
 
   question(event: QuestionRequest): CardElement[] {
     return this.present(event);
+  }
+
+  bindQuestionCleanup(input: {
+    sessionId: string;
+    questionRpcId: string;
+    cleanup: () => Promise<void>;
+  }): void {
+    const pending = this.pending.get(
+      requestKey(input.sessionId, input.questionRpcId),
+    );
+    if (pending !== undefined) pending.cleanup = input.cleanup;
   }
 
   present(event: QuestionRequest): CardElement[] {
@@ -183,13 +202,27 @@ export class LarkQuestionController implements ReplyButtonProvider {
           ]),
         );
       }
-      if (options.length === 0) {
-        elements.push(
-          markdownElement("> 请直接在当前飞书话题中回复答案。", {
-            elementId: `dsh_qh${generation}_${questionIndex}`,
-          }),
-        );
-      }
+      elements.push(
+        inputElement({
+          elementId: `dsh_qc${generation}_${questionIndex}`,
+          name: `dsh_custom_${generation}_${questionIndex}`,
+          placeholder: "输入其他答案并提交",
+          label: options.length === 0 ? "你的回答" : "其他",
+          behaviors: [
+            {
+              type: "callback",
+              value: encodeCardActionValue({
+                v: 1,
+                a: "answer_custom",
+                s: event.sessionId,
+                n: this.options.registry.mintNonce(event.sessionId),
+                r: event.rpcId,
+                q: question.id,
+              }),
+            },
+          ],
+        }),
+      );
     });
     return elements;
   }
@@ -202,6 +235,17 @@ export class LarkQuestionController implements ReplyButtonProvider {
       (candidate) => candidate.id === input.questionId,
     );
     if (question === undefined) throw new Error("question id does not belong to request");
+    if (input.mode === "custom") {
+      const custom = input.custom?.trim();
+      if (!custom) throw new Error("custom answer is empty");
+      pending.answers.set(question.id, {
+        id: question.id,
+        selected: [],
+        custom,
+      });
+      await this.submitIfComplete(key, pending);
+      return;
+    }
     if (input.mode === "multi-submit") {
       if (question.multiSelect !== true) {
         throw new Error("question is not multi-select");
@@ -283,9 +327,23 @@ export class LarkQuestionController implements ReplyButtonProvider {
       throw new Error(`question answer was not accepted: ${receipt.reason ?? "unknown"}`);
     }
     this.pending.delete(key);
+    await this.cleanup(pending);
   }
 
-  resolve(sessionId: string, questionRpcId: string): void {
-    this.pending.delete(requestKey(sessionId, questionRpcId));
+  async resolve(sessionId: string, questionRpcId: string): Promise<void> {
+    const key = requestKey(sessionId, questionRpcId);
+    const pending = this.pending.get(key);
+    this.pending.delete(key);
+    if (pending !== undefined) await this.cleanup(pending);
+  }
+
+  private async cleanup(pending: PendingQuestionRequest): Promise<void> {
+    await pending.cleanup?.().catch((error: unknown) => {
+      this.logger.warn("lark_question_cleanup_failed", {
+        sessionId: pending.event.sessionId,
+        questionRpcId: pending.event.rpcId,
+        errorName: error instanceof Error ? error.name : typeof error,
+      });
+    });
   }
 }

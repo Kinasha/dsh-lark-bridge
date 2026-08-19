@@ -52,18 +52,27 @@ function effects(journal: Journal): CardActionEffectsPort {
     approve: (input) => run(`approve:${input.approvalId}:${input.allowed}`),
     answer: (input) =>
       run(
-        `answer:${input.questionRpcId}:${input.questionId}:${input.mode}:${input.selected ?? ""}`,
+        `answer:${input.questionRpcId}:${input.questionId}:${input.mode}:${input.selected ?? input.custom ?? ""}`,
       ),
   };
 }
 
-function callback(value: unknown, options?: { operator?: string; message?: string }) {
+function callback(
+  value: unknown,
+  options?: { operator?: string; message?: string; inputValue?: string },
+) {
   return {
     schema: "2.0",
     header: { event_type: "card.action.trigger" },
     event: {
       operator: { open_id: options?.operator ?? OWNER },
-      action: { tag: "button", value },
+      action: {
+        tag: options?.inputValue === undefined ? "button" : "input",
+        value,
+        ...(options?.inputValue === undefined
+          ? {}
+          : { input_value: options.inputValue }),
+      },
       context: { open_message_id: options?.message ?? MESSAGE, open_chat_id: "oc_1" },
     },
   };
@@ -187,6 +196,48 @@ test("routes approve, reject and answer with their references", async () => {
     await router.handle(callback(encodeCardActionValue(action)));
     assert.ok(journal.calls.includes(expected), `${expected} ran`);
   }
+});
+
+test("routes a card input value as a custom question answer", async () => {
+  const store = registry();
+  const journal: Journal = { calls: [] };
+  const router = new CardActionRouter({ registry: store, effects: effects(journal) });
+  const nonce = store.mintNonce(SESSION);
+
+  const response = await router.handle(
+    callback(
+      { v: 1, a: "answer_custom", s: SESSION, n: nonce, r: "rpc_1", q: "reason" },
+      { inputValue: "我需要先检查线上日志" },
+    ),
+  );
+
+  assert.deepEqual(response.toast, { type: "success", content: "已回答" });
+  assert.deepEqual(journal.calls, [
+    "answer:rpc_1:reason:custom:我需要先检查线上日志",
+  ]);
+});
+
+test("a blank custom input does not consume its one-shot nonce", async () => {
+  const store = registry();
+  const journal: Journal = { calls: [] };
+  const router = new CardActionRouter({ registry: store, effects: effects(journal) });
+  const nonce = store.mintNonce(SESSION);
+  const value = {
+    v: 1,
+    a: "answer_custom",
+    s: SESSION,
+    n: nonce,
+    r: "rpc_1",
+    q: "reason",
+  };
+
+  await router.handle(callback(value, { inputValue: "   " }));
+  const response = await router.handle(
+    callback(value, { inputValue: "有效答案" }),
+  );
+
+  assert.deepEqual(response.toast, { type: "success", content: "已回答" });
+  assert.deepEqual(journal.calls, ["answer:rpc_1:reason:custom:有效答案"]);
 });
 
 test("rejects approve and answer that are missing their reference", async () => {

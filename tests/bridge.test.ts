@@ -212,10 +212,8 @@ test("a Feishu topic reuses one DSH session and replies to its root", async () =
   ]);
   assert.deepEqual(lark.operations, [
     "reaction:add:root-message:Get",
-    "cot:create:chat-1:root-message",
-    "reaction:remove:root-message:reaction-root-message",
-    "cot:complete:done",
     "reply:root-message",
+    "reaction:remove:root-message:reaction-root-message",
     "reaction:add:follow-up:Get",
     "cot:create:chat-1:follow-up",
     "reaction:remove:follow-up:reaction-follow-up",
@@ -225,15 +223,6 @@ test("a Feishu topic reuses one DSH session and replies to its root", async () =
   assert.deepEqual(
     lark.cotEvents.map((event) => event.eventType),
     [
-      "RUN_STARTED",
-      "REASONING_START",
-      "REASONING_MESSAGE_START",
-      "REASONING_MESSAGE_CONTENT",
-      "REASONING_MESSAGE_END",
-      "TOOL_CALL_START",
-      "TOOL_CALL_END",
-      "REASONING_END",
-      "RUN_FINISHED",
       "RUN_STARTED",
       "REASONING_START",
       "REASONING_MESSAGE_START",
@@ -451,6 +440,73 @@ test("messages sent from Web show progress in the linked Feishu topic", async ()
   const webCot = JSON.stringify(lark.cotEvents.slice(-9));
   assert.equal(webCot.includes("hidden Web arguments"), false);
   assert.equal(webCot.includes("hidden Web result"), false);
+});
+
+test("post-only replies do not create COT for messages sent from Web", async () => {
+  const client = new FakeDshClient();
+  let lark!: FakeLarkTransport;
+  lark = new FakeLarkTransport(
+    [
+      {
+        eventId: "event-1",
+        messageId: "root-message",
+        chatId: "chat-1",
+        chatType: "p2p",
+        senderId: "user-1",
+        messageType: "text",
+        content: "start from Feishu",
+      },
+    ],
+    async () => {
+      client.historyEvents = [
+        { type: "turn/start", seq: 2, time: 2, data: { turn: 2 } },
+        {
+          type: "user/message",
+          seq: 3,
+          time: 3,
+          data: {
+            source: { kind: "user", rpcId: "web-rpc-1" },
+            content: [{ type: "text", text: "continue from Web" }],
+          },
+        },
+        {
+          type: "assistant/message",
+          seq: 4,
+          time: 4,
+          data: {
+            message: {
+              content: [{ type: "text", text: "answer for Web" }],
+            },
+          },
+        },
+        {
+          type: "turn/end",
+          seq: 5,
+          time: 5,
+          data: { turn: 2, reason: { kind: "completed" } },
+        },
+      ];
+      const deadline = Date.now() + 700;
+      while (lark.replyTexts.length < 2 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    },
+    ["success"],
+  );
+
+  await runBridge({
+    client,
+    lark,
+    workspacePath: "/project",
+    enableWebCot: false,
+  });
+
+  assert.deepEqual(lark.userReplyTexts, ["continue from Web"]);
+  assert.deepEqual(lark.replyTexts, ["answer", "answer for Web"]);
+  assert.equal(
+    lark.operations.some((operation) => operation.startsWith("cot:create:")),
+    false,
+  );
 });
 
 test("a failed user-identity send falls back to a quoted bot reply", async () => {

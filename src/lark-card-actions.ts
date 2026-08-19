@@ -30,6 +30,7 @@ export type CardActionKind =
   | "approve"
   | "reject"
   | "answer"
+  | "answer_custom"
   | "answer_select"
   | "answer_submit";
 
@@ -57,6 +58,7 @@ const ACTION_KINDS: ReadonlySet<string> = new Set<CardActionKind>([
   "approve",
   "reject",
   "answer",
+  "answer_custom",
   "answer_select",
   "answer_submit",
 ]);
@@ -235,8 +237,9 @@ export interface CardActionEffectsPort {
     sessionId: string;
     questionRpcId: string;
     questionId: string;
-    mode: "single" | "multi-select" | "multi-submit";
+    mode: "single" | "custom" | "multi-select" | "multi-submit";
     selected?: string;
+    custom?: string;
     binding: CardActionBinding;
   }): Promise<void>;
 }
@@ -253,6 +256,7 @@ export interface CardActionRouterOptions {
 /** Extracted from the raw callback payload; shapes match the 2.0 callback. */
 export interface DecodedCardAction {
   value: unknown;
+  inputValue?: string;
   openMessageId?: string;
   operatorOpenId?: string;
 }
@@ -273,8 +277,11 @@ export function decodeCardActionEvent(raw: unknown): DecodedCardAction | undefin
         : undefined;
   const operatorOpenId =
     typeof operator?.open_id === "string" ? operator.open_id : undefined;
+  const inputValue =
+    typeof action?.input_value === "string" ? action.input_value : undefined;
   return {
     value: action?.value,
+    ...(inputValue === undefined ? {} : { inputValue }),
     ...(openMessageId === undefined ? {} : { openMessageId }),
     ...(operatorOpenId === undefined ? {} : { operatorOpenId }),
   };
@@ -346,18 +353,18 @@ export class CardActionRouter {
       return { toast: TOAST.expired };
     }
 
-    // `stop` is naturally idempotent: cancelling a finished session is a no-op,
-    // so it deliberately does not burn a nonce and can be pressed repeatedly.
-    if (value.a !== "stop" && !this.options.registry.consume(value.s, value.n)) {
-      this.reject("replayed", value.s);
-      return { toast: TOAST.handled };
-    }
-
     const binding = resolved.binding;
-    const effect = this.effectFor(value, binding);
+    const effect = this.effectFor(value, binding, decoded.inputValue);
     if (effect === undefined) {
       this.reject("malformed", value.s);
       return { toast: TOAST.expired };
+    }
+    // Validate the whole action before consuming its nonce. In particular, an
+    // empty input must remain editable instead of permanently burning submit.
+    // `stop` is naturally idempotent and deliberately keeps its nonce reusable.
+    if (value.a !== "stop" && !this.options.registry.consume(value.s, value.n)) {
+      this.reject("replayed", value.s);
+      return { toast: TOAST.handled };
     }
     // Detached: the response must not wait on DSH. Failures are logged, and the
     // user learns the outcome from the card itself.
@@ -390,6 +397,7 @@ export class CardActionRouter {
   private effectFor(
     value: CardActionValue,
     binding: CardActionBinding,
+    inputValue?: string,
   ): (() => Promise<void>) | undefined {
     const effects = this.options.effects;
     const sessionId = value.s;
@@ -410,11 +418,13 @@ export class CardActionRouter {
     const questionRpcId = value.r;
     const questionId = value.q;
     const selected = value.o;
+    const custom = inputValue?.trim();
     if (
       questionRpcId === undefined ||
       questionId === undefined ||
       ((value.a === "answer" || value.a === "answer_select") &&
-        selected === undefined)
+        selected === undefined) ||
+      (value.a === "answer_custom" && !custom)
     ) {
       return undefined;
     }
@@ -424,12 +434,15 @@ export class CardActionRouter {
         questionRpcId,
         questionId,
         mode:
-          value.a === "answer_select"
+          value.a === "answer_custom"
+            ? "custom"
+            : value.a === "answer_select"
             ? "multi-select"
             : value.a === "answer_submit"
               ? "multi-submit"
               : "single",
         ...(selected === undefined ? {} : { selected }),
+        ...(custom === undefined ? {} : { custom }),
         binding,
       });
   }
@@ -439,7 +452,13 @@ export class CardActionRouter {
     if (value.a === "approve") return TOAST.approved;
     if (value.a === "reject") return TOAST.rejected;
     if (value.a === "answer_select") return TOAST.selected;
-    if (value.a === "answer" || value.a === "answer_submit") return TOAST.answered;
+    if (
+      value.a === "answer" ||
+      value.a === "answer_custom" ||
+      value.a === "answer_submit"
+    ) {
+      return TOAST.answered;
+    }
     if (value.a === "retry") return TOAST.retried;
     return TOAST.newTopic;
   }

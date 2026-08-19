@@ -25,10 +25,13 @@ buttons, an approval prompt, and a link to a hosted report.
 `LarkReplyChannel` picks one of three tiers per turn and reports which one
 actually delivered:
 
-1. **cardkit** — a card 2.0 entity with `streaming_mode`, a collapsible progress
-   panel, and terminal buttons. Public cloud, the preferred path.
+1. **cardkit** — a card 2.0 entity with `streaming_mode`, an initially expanded
+   progress panel above the independently streamed answer, and terminal buttons.
+   The panel collapses when the turn ends. Public cloud, the preferred path.
 2. **cot** — the internal COT message for progress plus a `post` for the answer.
-   Attempted only when tier 1 is unavailable and `enableCot` is on.
+   Attempted only when tier 1 is unavailable, `enableCot` is on, and the route
+   does not need to create a new topic. A top-level message never emits COT,
+   because that surface cannot enter the topic being created.
 3. **post** — one rich-text reply. Always available, always the last resort.
 
 Availability of tiers 1 and 2 is probed **once per process**, not once per turn:
@@ -38,8 +41,9 @@ deployment facts, and re-probing every turn would pay a DNS timeout every messag
 The invariant every path upholds, enforced in code and asserted by a
 table-driven test: **one turn produces exactly one primary final answer.**
 
-`replyMode` defaults to `"post"` for one release, so the new path is opt-in
-until it has been exercised in the field.
+`replyMode="post"` is a strict post-only primary reply mode. `"card"` opts into
+the streaming tiers above. When CardKit is unavailable for a top-level message,
+the bridge sends the final `post` directly inside the new topic.
 
 ## Consequences
 

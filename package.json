@@ -1,6 +1,6 @@
 {
   "name": "@open-aiden/dsh-lark-bridge",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "private": false,
   "type": "module",
   "description": "Feishu/Lark message bridge for DeepSeek Harness",

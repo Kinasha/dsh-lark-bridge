@@ -22,8 +22,11 @@ export LARK_APP_SECRET=xxx
 ## 你会得到什么
 
 - 默认把机器人对一条私聊消息的首次回复创建为飞书话题，并在话题下继续回复。
-- 收到消息后先添加 `Get` 表情作为处理回执；COT 消息创建成功后自动移除。
-- 在飞书原生 COT 消息中实时展示安全的分析状态和工具调用进度，最终答案仍回复在同一话题下。
+- 收到消息后先添加 `Get` 表情作为处理回执；流式回复表面创建成功后自动移除。
+- `replyMode=card` 时，CardKit 流式卡片和最终答案始终位于同一个话题；CardKit
+  顶部的执行过程会随工具调用更新，正文在其下方独立流式增长，完成后执行过程自动
+  折叠。CardKit 不可用时，创建新话题的顶层消息直接降级为话题内 `post`，不会先发送
+  顶层 COT。
 - 每个飞书话题对应一个稳定的 DSH Session；同一私聊中的不同话题相互隔离。
 - 飞书 Session 和浏览器 Session 使用同一个 DSH Host；Web UI 可以看到完整对话、
   推理过程、工具调用和最终回复。
@@ -35,9 +38,10 @@ export LARK_APP_SECRET=xxx
   嵌入飞书富文本，不支持的类型或图片上传失败时保留文本预览或源码。
 - 新建飞书 Session 继承 DSH 当前的默认 Agent 配置，不再安装或强制选择额外 preset。
 - 插件负责飞书鉴权、WebSocket 自动重连、事件规范化、幂等回复和优雅退出。
-- COT 不包含模型隐藏推理、工具参数或文件内容；COT/表情接口不可用时会降级为普通文本回复。
+- COT 不包含模型隐藏推理、工具参数或文件内容；它只用于无需新建话题的合格路由。
+  `replyMode=post` 严格只使用 `post` 作为主回复表面。
 
-当前 `0.0.8` 兼容 `@deepseek-ai/dsh@0.1.0-rc.7`。DSH 仍处于 developer
+当前 `0.0.9` 兼容 `@deepseek-ai/dsh@0.1.0-rc.7`。DSH 仍处于 developer
 preview，升级 DSH 后请重新执行本文的验证步骤。
 
 ## 1. 准备飞书应用
@@ -56,7 +60,7 @@ preview，升级 DSH 后请重新执行本文的验证步骤。
 
    | 能力 | 权限 | 未开通时的行为 |
    | --- | --- | --- |
-   | 流式卡片回复（`replyMode=card`） | `cardkit:card:write` | 回退到 COT 或 post 回复 |
+   | 流式卡片回复（`replyMode=card`） | `cardkit:card:write` | 新话题直接回退到话题内 post；合格的既有话题可继续回退到 COT 或 post |
    | 读取用户发送的图片 | `im:message`、`im:message:readonly` 或 `im:message.history:readonly` | 图片被忽略，正文照常处理 |
    | 表情指令（如 ❌ 中断） | `im:message.reactions:read` | 表情事件不触发任何操作 |
 
@@ -164,9 +168,10 @@ DSH 插件都已就绪。然后打开 DSH 输出的 Web 地址，通常是
 
 正常情况下：
 
-1. 源消息先出现 `Get` 表情，COT 创建成功后表情消失。
-2. 机器人为首条消息创建话题；话题中的 COT 消息展示分析状态和 `read`、`glob`、
-   `grep` 等工具调用进度。
+1. 源消息先出现 `Get` 表情，回复表面创建成功后表情消失。
+2. 机器人为首条消息创建话题；`card` 模式下，话题中的 CardKit 卡片先展示分析状态和
+   `read`、`glob`、`grep` 等工具调用进度，再在下方独立流式呈现最终答案；Turn 完成后
+   执行过程自动折叠。
 3. DSH Web UI 中出现一个标题以 `飞书 ·` 开头的新 Session。
 4. Session 继承 DSH 当前默认 Agent 配置，时间线中可以看到完整的真实工具调用与结果。
 5. DSH 完成 Turn 后，最终答案回复在同一话题下。
@@ -179,16 +184,19 @@ DSH 插件都已就绪。然后打开 DSH 输出的 Web 地址，通常是
    DSH 后生效。
 9. 在 Web UI 中打开该 Session 并继续发送消息，原飞书话题会以本人身份显示用户
    输入；如果授权尚未完成或已经失效，则显示机器人发送的引用格式，并继续正常执行。
-10. 将 `replyMode` 设为 `card` 并保持 `enableQuestions=true` 后，Agent 发起
-    `AskUserQuestion` 时，当前流式卡片会插入问题和选项按钮。单选直接提交；多选先
-    逐项选择，再点“提交选择”；没有选项或需要自定义答案时，直接在当前飞书话题中
-    回复文本。一个请求包含多个问题时，插件会收齐整批答案，再使用原始 `rpcId`
-    一次性回复 DSH。
+10. 保持 `enableQuestions=true` 和 `enableCardKit=true` 后，Agent 发起
+    `AskUserQuestion` 时，飞书会显示问题和选项按钮；`replyMode=card` 时插入当前流式
+    卡片，`post` 模式则按需发送一张独立问题卡。单选直接提交；多选先逐项选择，再点
+    “提交选择”；每个问题都提供飞书 JSON 2.0 原生输入框用于“其他”自定义答案，也仍可
+    直接在当前话题中回复文本。一个请求包含多个问题时，插件会收齐整批答案，再使用原始
+    `rpcId` 一次性回复 DSH。答案被 DSH 接受后，嵌入式问题块会删除；独立问题卡优先
+    撤回，撤回受管理员时限等策略限制失败时会删除卡内问题组件。
 
 问题按钮只接受发起该话题的飞书用户操作，并校验卡片消息 ID 与一次性 nonce。其他
 用户、其他卡片或重复点击不会获得回答能力。`card.action.trigger` 通过与消息相同的
 长连接处理，不需要公网 webhook；CardKit 不可用时仍可继续执行普通回复，但不能在
-飞书侧回答等待中的 `AskUserQuestion`，此时应在 DSH Web UI 中处理。
+飞书侧回答等待中的 `AskUserQuestion`，此时应在 DSH Web UI 中处理。输入框使用飞书
+JSON 2.0 `input` 组件，单次自定义答案遵循平台的 1000 字符上限。
 
 当前插件接收私聊中的 `text` 和 `post` 消息；群聊只处理明确 `@机器人` 的这两类
 消息，未提及机器人的群消息和其他消息类型会被忽略。
@@ -221,9 +229,9 @@ Agent 知道 DSH Session 的准确 Workspace 路径；询问“你的工作区�
 | `DSH_LARK_USER_AUTH_STATE_PATH` | `string` | `$DSH_HOME/dsh-lark-bridge/user-auth.json` | `/secure/state/user-auth.json` | 用户 OAuth Token 状态文件；以 `0600` 原子写入并自动刷新 |
 | `DSH_LARK_USER_AUTH_REDIRECT_URI` | `string` | 当前回环 Web Host 的 `/dsh-lark/auth/callback` | `http://127.0.0.1:3080/dsh-lark/auth/callback` | 必须与飞书开放平台登记的重定向 URL 完全一致 |
 | `DSH_LARK_DOMAIN` | `string` | `feishu` | `lark` | 开放平台域：`feishu`（中国）或 `lark`（国际） |
-| `DSH_LARK_REPLY_MODE` | `string` | `post` | `card` | `card` 使用 CardKit 流式卡片；`post` 为一条富文本回复 |
+| `DSH_LARK_REPLY_MODE` | `string` | `post` | `card` | `card` 启用 CardKit/COT 流式层级；`post` 的主回复严格只走一条话题内富文本 post |
 | `DSH_LARK_CARDKIT_ENABLED` | `string` | `1` | `0` | 关闭流式卡片这一层 |
-| `DSH_LARK_COT_ENABLED` | `string` | `1` | `0` | 关闭原生 COT 这一层（仅字节租户可用） |
+| `DSH_LARK_COT_ENABLED` | `string` | `1` | `0` | 关闭 `card` 模式下的原生 COT 降级层（仅字节租户、且无需新建话题的路由可用） |
 | `DSH_LARK_ALWAYS_POST_FINAL` | `string` | `0` | `1` | 卡片之外再发一条纯文本回复，兼容 7.20 以下客户端 |
 | `DSH_LARK_STREAM_PRINT_FREQUENCY_MS` | `number` | `70` | `40` | 打字机间隔；飞书 7.23 起生效 |
 | `DSH_LARK_STREAM_PRINT_STEP` | `number` | `1` | `2` | 每次显示的字符数 |

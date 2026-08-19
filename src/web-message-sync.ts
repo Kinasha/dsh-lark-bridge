@@ -139,6 +139,7 @@ export class WebMessageSync {
     private readonly client: DshBridgeClient,
     private readonly lark: LarkMessageTransport,
     private readonly logger: BridgeLogger,
+    private readonly enableCot = true,
     private readonly pollMs = 500,
   ) {}
 
@@ -259,7 +260,11 @@ export class WebMessageSync {
         role: "user",
         identity,
       });
-      if (!turn.hasBridgePrompt && topic.chatId !== undefined) {
+      if (
+        this.enableCot &&
+        !turn.hasBridgePrompt &&
+        topic.chatId !== undefined
+      ) {
         try {
           const cotMessage = await this.lark.createCot({
             chatId: topic.chatId,

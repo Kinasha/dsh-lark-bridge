@@ -19,9 +19,11 @@ the workspace. Doing that from Feishu means a chat identity — reachable by
 anyone who can message the bot, and subject to whatever the tenant's account
 security happens to be — becomes an authorizer for the machine DSH runs on.
 
-The bundled `dsh-lark-safe` preset exists precisely because Feishu input is
-untrusted: it registers no shell, no writes, no skills, no subagents. Under that
-preset an approval never arises, because nothing needs approving.
+An earlier revision proposed bundled safe and review presets. That design was
+removed: the bridge must not replace the DSH deployment's default Agent
+composition. Feishu input is still untrusted, so approval remains an explicit
+bridge-level opt-in in addition to whatever authorization policy that default
+composition applies.
 
 ## Decision
 
@@ -44,14 +46,9 @@ button stays pressable.
 
 ## Consequences
 
-- `dsh-lark-safe` stays the default and stays unchanged.
-- A deployment that wants approval-gated tools must opt in deliberately: turn on
-  `enableApprovals` **and** select `dsh-lark-review`, the bundled preset that
-  actually registers mutating tools. It gates `write`, `edit` and
-  `str_replace_editor` through the seam, escalating only `allow` so an existing
-  `deny` stands, and refuses credential, key and VCS paths outright rather than
-  offering them for approval. It carries no shell, skills, or subagents: a file
-  edit is something an approver can judge from the tool call, and an arbitrary
-  shell command is not.
+- New Feishu sessions inherit the DSH deployment's current default Agent
+  composition; the bridge neither installs nor selects a preset.
+- A deployment that wants approval-gated tools must configure its default Agent
+  and authorization policy deliberately, then turn on `enableApprovals`.
 - The three checks are indistinguishable to the caller by design — the toast is
   the same for all of them and only the log records which one failed.

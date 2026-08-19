@@ -122,7 +122,7 @@ export const Config: z<Config> = z.object({
   replyMode: z
     .union(["post", "card"] as const)
     .default("post")
-    .description("Reply as a rich-text post, or as a streaming CardKit card."),
+    .description("Use post replies only, or enable streaming reply tiers."),
   enableCardKit: z
     .boolean()
     .default(true)
@@ -130,7 +130,7 @@ export const Config: z<Config> = z.object({
   enableCot: z
     .boolean()
     .default(true)
-    .description("Allow the native COT tier (ByteDance tenants only)."),
+    .description("Allow COT in card mode for eligible existing topics."),
   alwaysPostFinal: z
     .boolean()
     .default(false)
@@ -281,3 +281,17 @@ export function normalizeConfig(input: Config) {
 }
 
 export type NormalizedLarkConfig = ReturnType<typeof normalizeConfig>;
+
+/** Main reply surfaces enabled by the user-facing reply mode. */
+export function replyModePolicy(
+  config: Pick<
+    NormalizedLarkConfig,
+    "replyMode" | "enableCardKit" | "enableCot"
+  >,
+) {
+  const streamingEnabled = config.replyMode === "card";
+  return {
+    enableCardKit: streamingEnabled && config.enableCardKit,
+    enableCot: streamingEnabled && config.enableCot,
+  };
+}

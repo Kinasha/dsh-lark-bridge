@@ -8,7 +8,7 @@
  *             This is the public-cloud path.
  *   cot     — the ByteDance-internal `message_cot` message carries progress and
  *             a separate `post` reply carries the final answer. Reachable only
- *             on ByteDance tenants.
+ *             on ByteDance tenants and never used to create a new topic.
  *   post    — a single `post` reply with the final answer. Always available.
  *
  * The invariant every path upholds: **one turn produces exactly one primary
@@ -75,6 +75,11 @@ export interface ReplyButtonProvider {
     topicRootMessageId: string;
     ownerOpenId: string;
   }): void;
+  bindQuestionCleanup?(input: {
+    sessionId: string;
+    questionRpcId: string;
+    cleanup: () => Promise<void>;
+  }): void;
   question?(
     input: Extract<MuxEvent, { type: "question/requested" }>,
   ): readonly CardElement[];
@@ -97,6 +102,7 @@ export interface ReplyTransportPort {
     uuid: string;
     replyInThread: boolean;
   }): Promise<{ messageId?: string; threadId?: string }>;
+  deleteMessage?(messageId: string): Promise<void>;
   createCot?(input: {
     chatId: string;
     sourceMessageId: string;
@@ -157,6 +163,28 @@ export interface ReplySession {
   }): Promise<ReplyDelivery>;
 }
 
+type QuestionRequest = Extract<MuxEvent, { type: "question/requested" }>;
+type QuestionPresenter = (event: QuestionRequest) => Promise<boolean>;
+
+function buildQuestionCard(
+  elements: readonly CardElement[],
+  title: string | undefined,
+): ReturnType<typeof buildStreamingCard> {
+  const base = buildStreamingCard({
+    ...(title === undefined ? {} : { title }),
+    summary: "DeepSeek Harness 正在等待你的回答",
+  });
+  return {
+    ...base,
+    config: {
+      ...base.config,
+      streaming_mode: false,
+      summary: { content: "DeepSeek Harness 正在等待你的回答" },
+    },
+    body: { elements: [...elements] },
+  };
+}
+
 function isCardFatal(error: unknown): boolean {
   return error instanceof CardKitError && isFatalCardError(error.code);
 }
@@ -168,11 +196,16 @@ class PostReplySession implements ReplySession {
   constructor(
     protected readonly transport: ReplyTransportPort,
     protected readonly route: ReplyRoute,
+    private readonly questionPresenter?: QuestionPresenter,
   ) {}
 
   async pushText(_text: string): Promise<void> {}
 
   async present(_events: readonly SessionEvent[]): Promise<void> {}
+
+  async presentQuestion(event: QuestionRequest): Promise<boolean> {
+    return (await this.questionPresenter?.(event)) ?? false;
+  }
 
   async finalize(input: {
     outcome: CardTurnOutcome;
@@ -204,8 +237,9 @@ class CotReplySession extends PostReplySession {
     route: ReplyRoute,
     projection: DshCotProjection,
     private readonly logger: SemanticLogger,
+    questionPresenter?: QuestionPresenter,
   ) {
-    super(transport, route);
+    super(transport, route, questionPresenter);
     this.projection = projection;
   }
 
@@ -282,7 +316,18 @@ class CardKitReplySession implements ReplySession {
     if (this.broken || this.input.buttons.question === undefined) return false;
     const elements = this.input.buttons.question(event);
     if (elements.length === 0) return false;
-    return await this.guard(() => this.session.insertBlock(elements));
+    const inserted = await this.guard(() => this.session.insertBlock(elements));
+    if (inserted) {
+      const elementIds = elements.flatMap((element) =>
+        element.element_id === undefined ? [] : [element.element_id],
+      );
+      this.input.buttons.bindQuestionCleanup?.({
+        sessionId: this.input.sessionId,
+        questionRpcId: event.rpcId,
+        cleanup: () => this.session.removeBlocks(elementIds),
+      });
+    }
+    return inserted;
   }
 
   async finalize(input: {
@@ -346,6 +391,7 @@ class CardKitReplySession implements ReplySession {
 
 export class LarkReplyChannel {
   private cardKitAvailable: boolean;
+  private questionCardAvailable: boolean;
   private cotAvailable: boolean;
   private readonly logger: SemanticLogger;
   private readonly config: Required<
@@ -374,6 +420,10 @@ export class LarkReplyChannel {
       this.config.enableCardKit &&
       options.cardkit !== undefined &&
       options.transport.replyWithCard !== undefined;
+    this.questionCardAvailable =
+      options.cardkit !== undefined &&
+      options.transport.replyWithCard !== undefined &&
+      options.buttons?.question !== undefined;
     this.cotAvailable =
       this.config.enableCot && options.transport.createCot !== undefined;
   }
@@ -386,12 +436,103 @@ export class LarkReplyChannel {
   }
 
   async open(input: OpenReplyInput): Promise<ReplySession> {
-    const fallback = new PostReplySession(this.options.transport, input.route);
+    const questionPresenter: QuestionPresenter = (event) =>
+      this.presentQuestionCard(input, event);
+    const fallback = new PostReplySession(
+      this.options.transport,
+      input.route,
+      questionPresenter,
+    );
     return (
       (await this.openCardKit(input, fallback)) ??
-      (await this.openCot(input, fallback)) ??
+      // message_cot cannot carry a top-level reply into the topic it creates.
+      (input.route.replyInThread
+        ? undefined
+        : await this.openCot(input, questionPresenter)) ??
       fallback
     );
+  }
+
+  private async presentQuestionCard(
+    input: OpenReplyInput,
+    event: QuestionRequest,
+  ): Promise<boolean> {
+    const gateway = this.options.cardkit;
+    const transport = this.options.transport;
+    const buttons = this.options.buttons ?? NO_BUTTONS;
+    if (
+      !this.questionCardAvailable ||
+      gateway === undefined ||
+      transport.replyWithCard === undefined ||
+      buttons.question === undefined ||
+      input.ownerOpenId === undefined
+    ) {
+      return false;
+    }
+    const elements = buttons.question(event);
+    if (elements.length === 0) return false;
+    try {
+      const handle = await gateway.createCard(
+        buildQuestionCard(elements, this.config.cardTitle),
+      );
+      const sent = await transport.replyWithCard({
+        route: {
+          sourceMessageId: input.route.sourceMessageId,
+          topicRootMessageId: input.route.topicRootMessageId,
+        },
+        content: cardEntityMessageContent(handle.cardId),
+        uuid: cardSendUuid(handle.cardId),
+        replyInThread: input.route.replyInThread,
+      });
+      buttons.bindCard?.({
+        sessionId: input.sessionId,
+        cardId: handle.cardId,
+        ...(sent.messageId === undefined ? {} : { messageId: sent.messageId }),
+        chatId: input.route.chatId,
+        topicRootMessageId: input.route.topicRootMessageId,
+        ownerOpenId: input.ownerOpenId,
+      });
+      const elementIds = elements.flatMap((element) =>
+        element.element_id === undefined ? [] : [element.element_id],
+      );
+      buttons.bindQuestionCleanup?.({
+        sessionId: input.sessionId,
+        questionRpcId: event.rpcId,
+        cleanup: async () => {
+          if (sent.messageId !== undefined && transport.deleteMessage !== undefined) {
+            try {
+              await transport.deleteMessage(sent.messageId);
+              return;
+            } catch (error) {
+              this.logger.warn("question_message_withdraw_failed", {
+                sessionId: input.sessionId,
+                questionRpcId: event.rpcId,
+                errorName: error instanceof Error ? error.name : typeof error,
+              });
+            }
+          }
+          for (const elementId of elementIds) {
+            await handle.deleteElement(elementId);
+          }
+        },
+      });
+      this.logger.info("question_card_opened", {
+        sessionId: input.sessionId,
+        questionRpcId: event.rpcId,
+        cardId: handle.cardId,
+        ...(sent.messageId === undefined ? {} : { messageId: sent.messageId }),
+      });
+      return true;
+    } catch (error) {
+      this.questionCardAvailable = false;
+      this.logger.warn("question_card_unavailable", {
+        sessionId: input.sessionId,
+        questionRpcId: event.rpcId,
+        errorName: error instanceof Error ? error.name : typeof error,
+        ...(error instanceof CardKitError ? { code: error.code } : {}),
+      });
+      return false;
+    }
   }
 
   private async openCardKit(
@@ -420,6 +561,7 @@ export class LarkReplyChannel {
       );
       const streamOptions: CardStreamOptions = {
         logger: this.logger,
+        hasActionRow: stopBehaviors !== undefined,
         ...(this.config.streamElementMaxChars === undefined
           ? {}
           : { elementMaxChars: this.config.streamElementMaxChars }),
@@ -466,6 +608,7 @@ export class LarkReplyChannel {
       // One probe, not one per turn: a missing `cardkit:card:write` scope or an
       // unreachable CardKit is a deployment fact, not a transient failure.
       this.cardKitAvailable = false;
+      this.questionCardAvailable = false;
       this.logger.warn("card_reply_unavailable", {
         sessionId: input.sessionId,
         errorName: error instanceof Error ? error.name : typeof error,
@@ -477,7 +620,7 @@ export class LarkReplyChannel {
 
   private async openCot(
     input: OpenReplyInput,
-    fallback: PostReplySession,
+    questionPresenter: QuestionPresenter,
   ): Promise<ReplySession | undefined> {
     const transport = this.options.transport;
     if (!this.cotAvailable || transport.createCot === undefined) return undefined;
@@ -506,6 +649,7 @@ export class LarkReplyChannel {
         input.route,
         projection,
         this.logger,
+        questionPresenter,
       );
     } catch (error) {
       // COT lives on a ByteDance-internal host; on any other tenant this fails
