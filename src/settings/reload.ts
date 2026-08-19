@@ -7,7 +7,7 @@
  */
 
 import { deepEqualJson } from "@deepseek-ai/dsh-settings";
-import type { NormalizedLarkConfig } from "./lark-config.js";
+import type { NormalizedLarkConfig } from "./schema.js";
 
 export interface LarkRuntimeHandle {
   dispose(): void | Promise<void>;
@@ -18,6 +18,7 @@ export type LarkRuntimeFactory = (
 ) => LarkRuntimeHandle;
 
 const LIVE_FIELDS = new Set<keyof NormalizedLarkConfig>([
+  "progressSurface",
   "alwaysPostFinal",
   "streamPrintFrequencyMs",
   "streamPrintStep",

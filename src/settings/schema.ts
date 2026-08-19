@@ -10,20 +10,21 @@
  *  - Every field is **flat**. `SettingsPathOp` paths through the route are
  *    length-1 by design, so a nested object would be unwritable from the UI.
  *  - No field carries `role('secret')`. Secrets live in `ctx.credentials`
- *    (see `lark-credentials.ts`); and `redactSecrets` only walks object, dict
+ *    (see `credentials.ts`); and `redactSecrets` only walks object, dict
  *    and array nodes, so a secret placed under the `z.transform` used by
  *    `SenderIdList` would be returned to the browser verbatim.
  */
 
 import path from "node:path";
 import z from "@deepseek-ai/schemastery";
-import { defaultAdmissionStatePath } from "./event-admission.js";
-import { defaultLarkUserAuthStatePath } from "./lark-user-auth.js";
+import { defaultAdmissionStatePath } from "../bridge/event-admission.js";
+import { defaultLarkUserAuthStatePath } from "../lark/user-auth.js";
 
 export type LarkDomain = "feishu" | "lark";
 export type LarkReplyMode = "post" | "card";
 export type ToolDetailMode = "hidden" | "compact" | "standard" | "detailed";
 export type ProgressStyle = "timeline" | "list" | "plain";
+export type ProgressSurface = "cot" | "card";
 export type ThinkingIcon = "brain" | "sparkles" | "robot" | "none";
 
 export interface Config {
@@ -45,6 +46,7 @@ export interface Config {
   replyMode?: LarkReplyMode;
   enableCardKit?: boolean;
   enableCot?: boolean;
+  progressSurface?: ProgressSurface;
   alwaysPostFinal?: boolean;
   streamPrintFrequencyMs?: number;
   streamPrintStep?: number;
@@ -139,6 +141,12 @@ export const Config: z<Config> = z.object({
     .boolean()
     .default(true)
     .description("Allow COT in card mode for eligible existing topics."),
+  progressSurface: z
+    .union(["cot", "card"] as const)
+    .default("cot")
+    .description(
+      "Thinking chain a turn prefers: the native COT message Web-originated turns also use, or the card progress panel.",
+    ),
   alwaysPostFinal: z
     .boolean()
     .default(false)
@@ -289,6 +297,7 @@ export function normalizeConfig(input: Config) {
     replyMode: input.replyMode ?? "post",
     enableCardKit: input.enableCardKit ?? true,
     enableCot: input.enableCot ?? true,
+    progressSurface: input.progressSurface ?? "cot",
     alwaysPostFinal: input.alwaysPostFinal ?? false,
     streamPrintFrequencyMs: input.streamPrintFrequencyMs ?? 70,
     streamPrintStep: input.streamPrintStep ?? 1,

@@ -38,6 +38,7 @@
         replyMode: !!js "process.env.DSH_LARK_REPLY_MODE === 'card' ? 'card' : 'post'"
         enableCardKit: !!js "process.env.DSH_LARK_CARDKIT_ENABLED !== '0'"
         enableCot: !!js "process.env.DSH_LARK_COT_ENABLED !== '0'"
+        progressSurface: !!js "process.env.DSH_LARK_PROGRESS_SURFACE === 'card' ? 'card' : 'cot'"
         alwaysPostFinal: !!js "process.env.DSH_LARK_ALWAYS_POST_FINAL === '1'"
         streamPrintFrequencyMs: !!js "Number(process.env.DSH_LARK_STREAM_PRINT_FREQUENCY_MS || 70)"
         streamPrintStep: !!js "Number(process.env.DSH_LARK_STREAM_PRINT_STEP || 1)"

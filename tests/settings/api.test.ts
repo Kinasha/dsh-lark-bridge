@@ -5,8 +5,8 @@ import {
   registerLarkSettingsApi,
   type LarkSettingsApiPort,
   type LarkSettingsApiService,
-} from "../src/lark-settings-api.js";
-import { LarkCredentialWriteError } from "../src/lark-credentials.js";
+} from "../../src/settings/api.js";
+import { LarkCredentialWriteError } from "../../src/settings/credentials.js";
 
 async function withSettingsServer(
   service: LarkSettingsApiService,

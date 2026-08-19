@@ -12,7 +12,7 @@ import {
   setLarkCredential,
   unsetLarkCredential,
   type CredentialProviderPort,
-} from "../src/lark-credentials.js";
+} from "../../src/settings/credentials.js";
 
 interface FakeStore {
   values: Map<string, { value: string; source: string }>;

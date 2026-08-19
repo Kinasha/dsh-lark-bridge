@@ -6,14 +6,14 @@ import {
   LARK_CREDENTIAL_REFS,
   LarkCredentialWriteError,
   type LarkCredentialRef,
-} from "./lark-credentials.js";
-import { CONFIG_FIELD_NAMES, type Config } from "./lark-config.js";
+} from "./credentials.js";
+import { CONFIG_FIELD_NAMES, type Config } from "./schema.js";
 
 const SETTINGS_API_PATH = "/dsh-lark/settings/api";
 const MAX_REQUEST_BYTES = 64 * 1_024;
 
 /**
- * The write allowlist is derived from the schema (see `lark-config.ts`) rather
+ * The write allowlist is derived from the schema (see `schema.ts`) rather
  * than hand-listed. The previous hardcoded Set had to be edited in lockstep
  * with the schema, and forgetting one entry produced an opaque 400 for that
  * field alone. An explicit schema may still be supplied for tests.

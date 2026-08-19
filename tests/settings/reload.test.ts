@@ -3,8 +3,8 @@ import test from "node:test";
 import {
   LarkRuntimeReloader,
   requiresRuntimeReload,
-} from "../src/lark-config-reload.js";
-import { normalizeConfig } from "../src/lark-config.js";
+} from "../../src/settings/reload.js";
+import { normalizeConfig } from "../../src/settings/schema.js";
 
 test("presentation-only settings update the live snapshot without rebuilding runtime", async () => {
   const events: string[] = [];
@@ -28,6 +28,9 @@ test("presentation-only settings update the live snapshot without rebuilding run
     maxProgressItems: 12,
     collapseProgressOnFinish: false,
     streamPrintStep: 3,
+    // Which surface carries the thinking chain is read per turn, so switching
+    // it must not tear down the transport and drop the long connection.
+    progressSurface: "card",
   });
   await reloader.apply(updated);
 
