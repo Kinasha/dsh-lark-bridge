@@ -2,6 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22-339933?style=flat-square&logo=nodedotjs)](package.json)
+[![CI](https://github.com/Kinasha/dsh-lark-bridge/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Kinasha/dsh-lark-bridge/actions/workflows/ci.yml)
 
 把飞书机器人接入本地运行的 DeepSeek Harness（DSH）。插件直接使用飞书 Node SDK
 建立长连接、接收消息和发送回复，不要求安装或初始化 `lark-cli`。
@@ -23,10 +24,13 @@ export LARK_APP_SECRET=xxx
 
 - 默认把机器人对一条私聊消息的首次回复创建为飞书话题，并在话题下继续回复。
 - 收到消息后先添加 `Get` 表情作为处理回执；流式回复表面创建成功后自动移除。
-- `replyMode=card` 时，CardKit 流式卡片和最终答案始终位于同一个话题；CardKit
+- `replyMode=card` 时，思维链默认使用飞书原生 COT（`progressSurface=cot`），
+  与 Web 侧消息呈现完全一致；最终答案作为话题内 `post` 送达。新建话题的第一条
+  消息无法附加 COT，此时自动回退到 CardKit 卡片。
+- `progressSurface=card` 时改用 CardKit 流式卡片：卡片和最终答案位于同一个话题，
   顶部的执行过程会随分析与工具调用穿插更新，正文在其下方独立流式增长。执行过程可
   选择四档工具详情、三种布局和四种思维图标，也可控制条目上限与完成后是否折叠。
-  CardKit 不可用时，创建新话题的顶层消息直接降级为话题内 `post`，不会先发送顶层 COT。
+  两种形态读取同一份执行过程模型，工具标题、耗时与成败判定不会互相偏离。
 - 每个飞书话题对应一个稳定的 DSH Session；同一私聊中的不同话题相互隔离。
 - 飞书 Session 和浏览器 Session 使用同一个 DSH Host；Web UI 可以看到完整对话、
   推理过程、工具调用和最终回复。
@@ -60,7 +64,7 @@ preview，升级 DSH 后请重新执行本文的验证步骤。
 
    | 能力 | 权限 | 未开通时的行为 |
    | --- | --- | --- |
-   | 流式卡片回复（`replyMode=card`） | `cardkit:card:write` | 新话题直接回退到话题内 post；合格的既有话题可继续回退到 COT 或 post |
+   | 流式卡片回复（`replyMode=card`） | `cardkit:card:write` | 合格的既有话题继续使用原生 COT；新话题直接回退到话题内 post |
    | 读取用户发送的图片 | `im:message`、`im:message:readonly` 或 `im:message.history:readonly` | 图片被忽略，正文照常处理 |
    | 表情指令（如 ❌ 中断） | `im:message.reactions:read` | 表情事件不触发任何操作 |
 
@@ -146,8 +150,8 @@ DSH 插件都已就绪。然后打开 DSH 输出的 Web 地址，通常是
 9. 在 Web UI 中打开该 Session 并继续发送消息，原飞书话题会以本人身份显示用户
    输入；如果授权尚未完成或已经失效，则显示机器人发送的引用格式，并继续正常执行。
 10. 保持 `enableQuestions=true` 和 `enableCardKit=true` 后，Agent 发起
-    `AskUserQuestion` 时，飞书会显示问题和选项按钮；`replyMode=card` 时插入当前流式
-    卡片，`post` 模式则按需发送一张独立问题卡。单选直接提交；多选先逐项选择，再点
+    `AskUserQuestion` 时，飞书会显示问题和选项按钮；卡片形态下插入当前流式卡片，
+    COT 与 `post` 形态则按需发送一张独立问题卡。单选直接提交；多选先逐项选择，再点
     “提交选择”；每个问题都提供飞书 JSON 2.0 原生输入框用于“其他”自定义答案，也仍可
     直接在当前话题中回复文本。一个请求包含多个问题时，插件会收齐整批答案，再使用原始
     `rpcId` 一次性回复 DSH。答案被 DSH 接受后，嵌入式问题块会删除；独立问题卡优先
@@ -164,7 +168,8 @@ JSON 2.0 `input` 组件，单次自定义答案遵循平台的 1000 字符上限
 
 飞书原生 COT 需要支持该能力的租户和客户端版本；当前 ByteDance 租户要求桌面端
 不低于 7.70、移动端不低于 7.74。若 COT 或表情权限未开通，启动日志会记录失败，
-但 DSH 执行和最终文本回复不受影响。
+但 DSH 执行和最终文本回复不受影响。单次写入失败只降级当前 Turn，并把已创建的
+思维链正常结束；连续多次创建失败才会在本进程内停用该层，CardKit 层同理。
 
 Agent 知道 DSH Session 的准确 Workspace 路径；询问“你的工作区在哪”时会直接
 回答，不会为了发现路径执行全量 `glob`。仍应从具体项目目录启动 DSH，避免把家目录
@@ -192,7 +197,8 @@ Agent 知道 DSH Session 的准确 Workspace 路径；询问“你的工作区�
 | `DSH_LARK_DOMAIN` | `string` | `feishu` | `lark` | 开放平台域：`feishu`（中国）或 `lark`（国际） |
 | `DSH_LARK_REPLY_MODE` | `string` | `post` | `card` | `card` 启用 CardKit/COT 流式层级；`post` 的主回复严格只走一条话题内富文本 post |
 | `DSH_LARK_CARDKIT_ENABLED` | `string` | `1` | `0` | 关闭流式卡片这一层 |
-| `DSH_LARK_COT_ENABLED` | `string` | `1` | `0` | 关闭 `card` 模式下的原生 COT 降级层（仅字节租户、且无需新建话题的路由可用） |
+| `DSH_LARK_COT_ENABLED` | `string` | `1` | `0` | 关闭 `card` 模式下的原生 COT 层（仅字节租户、且无需新建话题的路由可用） |
+| `DSH_LARK_PROGRESS_SURFACE` | `string` | `cot` | `card` | 思维链形态：`cot` 使用飞书原生思维链，与 Web 侧消息完全一致；`card` 在卡片内展示执行过程 |
 | `DSH_LARK_ALWAYS_POST_FINAL` | `string` | `0` | `1` | 卡片之外再发一条纯文本回复，兼容 7.20 以下客户端 |
 | `DSH_LARK_STREAM_PRINT_FREQUENCY_MS` | `number` | `70` | `40` | 打字机间隔；飞书 7.23 起生效 |
 | `DSH_LARK_STREAM_PRINT_STEP` | `number` | `1` | `2` | 每次显示的字符数 |
@@ -206,7 +212,7 @@ Agent 知道 DSH Session 的准确 Workspace 路径；询问“你的工作区�
 | `DSH_LARK_HTML_REPORT_ORIGIN` | `string` | 当前回环 Web Host | `http://192.168.1.10:3080` | 飞书客户端与 DSH 不同机时覆盖报告地址 |
 | `DSH_LARK_HTML_REPORT_TTL_MS` | `number` | `86400000`（24 小时） | `3600000` | 已托管报告的保留时长 |
 | `DSH_LARK_CARD_ACTIONS_ENABLED` | `string` | `1` | `0` | 关闭卡片按钮回调 |
-| `DSH_LARK_APPROVALS_ENABLED` | `string` | `0` | `1` | 允许飞书用户批准工具调用；默认关闭，见 ADR-0008 |
+| `DSH_LARK_APPROVALS_ENABLED` | `string` | `0` | `1` | 允许飞书用户批准工具调用；默认关闭；开启前请先确认 DSH 默认 Agent 的授权策略 |
 | `DSH_LARK_QUESTIONS_ENABLED` | `string` | `1` | `0` | 关闭以卡片按钮呈现助手提问 |
 | `DSH_LARK_INBOUND_RESOURCES_ENABLED` | `string` | `1` | `0` | 关闭读取消息中的图片 |
 | `DSH_LARK_MAX_INBOUND_IMAGES` | `number` | `4` | `1` | 单条消息最多读取的图片数 |
@@ -333,19 +339,60 @@ dsh plugin --profile web remove @open-aiden/dsh-lark-bridge
 ```bash
 npm ci
 npm run build
-npm test
-npm pack --dry-run
 npm run verify
 ```
 
+本地调试可以从 `.env.example` 复制一份 `.env`（已在 `.gitignore` 中），插件会按
+`<启动目录>/.env` -> `$DSH_HOME/.env` 的顺序读取；进程环境变量优先级更高。
+
 测试使用假的飞书和 DSH 边界，不需要真实 App Secret。提交问题或改动前，请先确保
-`npm run verify` 通过；它统一执行源码与测试类型检查、行为测试、覆盖率门槛和 package
-内容检查。
+`npm run verify` 通过；本地与 CI 用的是同一道门禁：
+
+| 命令 | 检查内容 |
+| --- | --- |
+| `npm run typecheck` | `src/` 与 `tests/` 的类型 |
+| `npm test` | 递归发现并运行 `tests/**/*.test.ts` |
+| `npm run coverage` | 同一组测试加覆盖率门槛：行 80%、分支 70%、函数 70% |
+| `npm run check:repo` | 跨文件一致性：bundle patch、README、`.env.example` 的环境变量三方对齐；版本号与 DSH rc 对齐；`.nvmrc`、`engines.node` 与 CI matrix 对齐；README 源码结构与实际目录对齐 |
+| `npm run check:package` | 打出真实 tarball 并校验：声明的入口都在包内、模块闭包完整、运行时不引用未声明的依赖、不泄漏源码与密钥，最后实际 import 插件入口并运行一次 `doctor` |
+
+CI 在 Node 22、24、26 上执行同一组命令；`npm audit` 与 CodeQL 另外每周跑一次。
+推送 `v<version>` 标签会触发发布流程：先复用 CI 门禁，再校验标签与 `package.json`
+版本一致、从 `CHANGELOG.md` 取出该版本的发布说明，带 provenance 发布到 npm 并创建
+GitHub Release（需要仓库配置 `NPM_TOKEN` secret）。
+
+### 源码结构
+
+```
+src/
+  plugin.ts          DSH 插件入口（package main）
+  plugin-cli.ts      dsh-lark-bridge doctor 命令入口
+  client.ts          DSH Web 设置界面（浏览器打包入口）
+  config.ts          仓库路径与本地默认端口
+  logger.ts          SemanticLogger 接口
+  bridge/            消息准入、topic 调度、turn 执行与消费者生命周期
+  dsh/               DSH harness 接缝：会话客户端、apiProxy 客户端、事件流
+  progress/          turn 进度投影与飞书原生 COT 渲染
+  lark/              飞书平台：传输、Markdown、菜单、附件、用户授权
+  card/              回复通道与卡片表面：CardKit、流式卡片、按钮回调、提问
+  html/              agent 生成的 HTML 报告：解析、卡片翻译、本地托管
+  settings/          设置 schema、热重载、凭据与设置写入路由
+  standalone/        本地开发运行时（仅用于本地调试）；不随 npm 包发布
+```
+
+`tests/` 与 `src/` 一一对应：`src/card/stream.ts` 的测试位于 `tests/card/stream.test.ts`，
+`src/plugin.ts` 等根模块的测试留在 `tests/` 根。测试脚本递归发现 `tests/` 下的全部
+`*.test.ts`，新增子目录不需要改动脚本。
+
 
 ## 支持与贡献
 
-问题和改进建议请提交到 [GitHub Issues](https://github.com/Kinasha/dsh-lark-bridge/issues)。
-Pull Request 应保持改动聚焦，并附带与行为变化对应的测试。
+- 问题和改进建议请提交到 [GitHub Issues](https://github.com/Kinasha/dsh-lark-bridge/issues)。
+- 提交 Pull Request 前请阅读[贡献指南](CONTRIBUTING.md)：改动保持聚焦、附带与行为变化
+  对应的测试，并确保 `npm run verify` 通过。
+- 参与本项目即表示同意遵守[行为准则](CODE_OF_CONDUCT.md)。
+- 安全漏洞请按 [安全策略](SECURITY.md) 私下报告，不要提交公开 issue。
+- 版本之间的行为变化见 [更新日志](CHANGELOG.md)。
 
 ## 项目状态
 

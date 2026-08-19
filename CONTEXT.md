@@ -35,10 +35,22 @@ readiness. A sufficiently stable ready period resets the backoff sequence.
 ## Reply Channel
 
 The chooser that decides how one Turn reaches its Topic, and degrades when a tier
-is unavailable: a streaming CardKit card, then the native COT message plus a post
-reply, then a post reply alone. Availability of the first two tiers is probed once
-per process, not per Turn. Whichever tier delivers, a Turn produces exactly one
-primary final answer.
+is unavailable. By default it prefers the native COT message plus a post reply,
+falls back to a streaming CardKit card — which is also what a Topic's first Turn
+gets, since COT cannot create the Topic it would attach to — and finally to a post
+reply alone. `progressSurface` swaps the first two. A tier is retired for the rest
+of the process only after consecutive failures to open it, so one blip does not
+cost every later Turn its progress. Whichever tier delivers, a Turn produces
+exactly one primary final answer, and never an empty one.
+
+## Progress Projection
+
+The single reading of a Turn's lifecycle events, shared by every surface that
+shows progress: which tool started, what to call it, when it ended, and whether it
+failed. Both the COT chain and the card panel render from it, so the two cannot
+disagree about the same Turn. It emits tool steps in start/end pairs — a surface
+that hides tools drops both halves — and closes whatever is still open when the
+Turn ends, so no tool is left running in the reader's view.
 
 ## Card Session
 
