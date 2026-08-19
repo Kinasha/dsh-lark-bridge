@@ -1,13 +1,64 @@
 # DSH Host-plane Feishu transport. Install this package into the same profile
 # that provides apiProxy (normally the Web profile).
+#
+# These values form the settings namespace's `base` layer, below the user layer
+# the settings UI writes. LARK_APP_SECRET is deliberately absent: it is read
+# through `ctx.credentials`, whose own layering already puts the process
+# environment on top as a read-only source.
+#
+# Every `!!js` expression is QUOTED. An unquoted one containing `: ` — any
+# ternary, for instance — is parsed by YAML as a mapping instead of a tagged
+# scalar, which silently drops the `!!js` tag and hands the plugin an object.
+# `tests/bundle-patch.test.ts` asserts this for every entry, because the failure
+# is silent for any field whose schema tolerates the wrong shape.
 
 - insert:
     - id: dsh-lark-bridge
-      name: '@aiden-ai/dsh-lark-bridge'
-      inject: [apiProxy]
+      name: '@open-aiden/dsh-lark-bridge'
+      # `credentials` is intentionally absent: listing it here would make it
+      # required, and the plugin resolves it opportunistically instead so a
+      # profile without the seam still loads and falls back to the environment.
+      inject: [apiProxy, webServer, settings]
       config:
-        enabled: !!js process.env.DSH_LARK_ENABLED !== '0'
-        workspacePath: !!js process.env.DSH_LARK_WORKSPACE || process.cwd()
-        workspaceTitle: !!js process.env.DSH_LARK_WORKSPACE_TITLE
-        agentPreset: !!js process.env.DSH_LARK_AGENT_PRESET || 'dsh-lark-safe'
-        installBundledPreset: true
+        enabled: !!js "process.env.DSH_LARK_ENABLED !== '0'"
+        appId: !!js "process.env.LARK_APP_ID"
+        domain: !!js "process.env.DSH_LARK_DOMAIN === 'lark' ? 'lark' : 'feishu'"
+        workspacePath: !!js "process.env.DSH_LARK_WORKSPACE || process.cwd()"
+        workspaceTitle: !!js "process.env.DSH_LARK_WORKSPACE_TITLE"
+        allowedSenderIds: !!js "process.env.DSH_LARK_ALLOWED_SENDERS ? process.env.DSH_LARK_ALLOWED_SENDERS.split(',').map(value => value.trim()).filter(Boolean) : null"
+        blockedSenderIds: !!js "process.env.DSH_LARK_BLOCKED_SENDERS ? process.env.DSH_LARK_BLOCKED_SENDERS.split(',').map(value => value.trim()).filter(Boolean) : null"
+        maxConcurrentTopics: !!js "Number(process.env.DSH_LARK_MAX_CONCURRENT_TOPICS || 4)"
+        maxPendingMessages: !!js "Number(process.env.DSH_LARK_MAX_PENDING_MESSAGES || 256)"
+        turnTimeoutMs: !!js "Number(process.env.DSH_LARK_TURN_TIMEOUT_MS || 0)"
+        eventStatePath: !!js "process.env.DSH_LARK_EVENT_STATE_PATH"
+        eventRetentionMs: !!js "Number(process.env.DSH_LARK_EVENT_RETENTION_MS || 604800000)"
+        enableUserAuth: !!js "process.env.DSH_LARK_USER_AUTH_ENABLED !== '0'"
+        userAuthStatePath: !!js "process.env.DSH_LARK_USER_AUTH_STATE_PATH"
+        userAuthRedirectUri: !!js "process.env.DSH_LARK_USER_AUTH_REDIRECT_URI"
+        replyMode: !!js "process.env.DSH_LARK_REPLY_MODE === 'card' ? 'card' : 'post'"
+        enableCardKit: !!js "process.env.DSH_LARK_CARDKIT_ENABLED !== '0'"
+        enableCot: !!js "process.env.DSH_LARK_COT_ENABLED !== '0'"
+        progressSurface: !!js "process.env.DSH_LARK_PROGRESS_SURFACE === 'card' ? 'card' : 'cot'"
+        alwaysPostFinal: !!js "process.env.DSH_LARK_ALWAYS_POST_FINAL === '1'"
+        streamPrintFrequencyMs: !!js "Number(process.env.DSH_LARK_STREAM_PRINT_FREQUENCY_MS || 70)"
+        streamPrintStep: !!js "Number(process.env.DSH_LARK_STREAM_PRINT_STEP || 1)"
+        streamElementMaxChars: !!js "Number(process.env.DSH_LARK_STREAM_ELEMENT_MAX_CHARS || 30000)"
+        toolDetailMode: !!js "['hidden', 'compact', 'standard', 'detailed'].includes(process.env.DSH_LARK_TOOL_DETAIL_MODE) ? process.env.DSH_LARK_TOOL_DETAIL_MODE : 'standard'"
+        progressStyle: !!js "['timeline', 'list', 'plain'].includes(process.env.DSH_LARK_PROGRESS_STYLE) ? process.env.DSH_LARK_PROGRESS_STYLE : 'timeline'"
+        thinkingIcon: !!js "['brain', 'sparkles', 'robot', 'none'].includes(process.env.DSH_LARK_THINKING_ICON) ? process.env.DSH_LARK_THINKING_ICON : 'brain'"
+        maxProgressItems: !!js "Number(process.env.DSH_LARK_MAX_PROGRESS_ITEMS || 100)"
+        collapseProgressOnFinish: !!js "process.env.DSH_LARK_COLLAPSE_PROGRESS_ON_FINISH !== '0'"
+        enableHtmlReports: !!js "process.env.DSH_LARK_HTML_REPORTS_ENABLED !== '0'"
+        htmlReportOrigin: !!js "process.env.DSH_LARK_HTML_REPORT_ORIGIN"
+        htmlReportTtlMs: !!js "Number(process.env.DSH_LARK_HTML_REPORT_TTL_MS || 86400000)"
+        enableCardActions: !!js "process.env.DSH_LARK_CARD_ACTIONS_ENABLED !== '0'"
+        enableApprovals: !!js "process.env.DSH_LARK_APPROVALS_ENABLED === '1'"
+        enableQuestions: !!js "process.env.DSH_LARK_QUESTIONS_ENABLED !== '0'"
+        enableInboundResources: !!js "process.env.DSH_LARK_INBOUND_RESOURCES_ENABLED !== '0'"
+        maxInboundImages: !!js "Number(process.env.DSH_LARK_MAX_INBOUND_IMAGES || 4)"
+        maxInboundImageBytes: !!js "Number(process.env.DSH_LARK_MAX_INBOUND_IMAGE_BYTES || 5000000)"
+        enableBotMenu: !!js "process.env.DSH_LARK_BOT_MENU_ENABLED !== '0'"
+        enableReactionCommands: !!js "process.env.DSH_LARK_REACTION_COMMANDS_ENABLED !== '0'"
+        interruptEmoji: !!js "process.env.DSH_LARK_INTERRUPT_EMOJI || 'X'"
+        useEventStream: !!js "process.env.DSH_LARK_EVENT_STREAM_ENABLED !== '0'"
+        allowSlashCommands: !!js "process.env.DSH_LARK_ALLOW_SLASH_COMMANDS === '1'"

@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # release.yml runs this same gate before it publishes.
+  workflow_call:
+
+permissions:
+  contents: read
+
+# A newer push to a pull request supersedes the run in flight; pushes to main
+# are kept so every commit on the default branch has a result of its own.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    name: verify (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # The lowest entry is what engines.node and .nvmrc promise; the rest are
+        # the releases a user may already be running. scripts/check-repo.mjs
+        # fails if this list stops agreeing with engines.node.
+        node: [22, 24, 26]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # `prepare` builds during install, so a broken build fails here.
+      - name: install
+        run: npm ci
+
+      - name: typecheck
+        run: npm run typecheck
+
+      - name: test
+        run: npm test
+
+      - name: coverage
+        shell: bash
+        run: npm run coverage 2>&1 | tee coverage.log
+
+      - name: publish coverage to the run summary
+        if: ${{ always() && matrix.node == 22 }}
+        shell: bash
+        run: |
+          if [ ! -f coverage.log ]; then exit 0; fi
+          {
+            echo '### Coverage'
+            echo '```text'
+            sed -n '/start of coverage report/,/end of coverage report/p' coverage.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: repository consistency
+        run: npm run check:repo
+
+      - name: package contents
+        run: npm run check:package
+
+      - name: keep the packed tarball
+        if: ${{ matrix.node == 22 }}
+        run: npm pack --pack-destination .
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ matrix.node == 22 }}
+        with:
+          name: package-tarball
+          path: "*.tgz"
+          retention-days: 14
+          if-no-files-found: error
