@@ -33,6 +33,7 @@ export interface Config {
   blockedSenderIds?: string[];
   maxConcurrentTopics?: number;
   maxPendingMessages?: number;
+  turnTimeoutMs?: number;
   eventStatePath?: string;
   eventRetentionMs?: number;
   enableUserAuth?: boolean;
@@ -97,6 +98,14 @@ export const Config: z<Config> = z.object({
     .min(1)
     .default(256)
     .description("Maximum number of inbound messages kept pending."),
+  turnTimeoutMs: z
+    .number()
+    .step(1)
+    .min(0)
+    .default(0)
+    .description(
+      "Maximum total duration of one DSH turn in milliseconds; 0 disables the timeout.",
+    ),
   eventStatePath: z.string().description("Admission state file path."),
   eventRetentionMs: z
     .number()
@@ -240,6 +249,7 @@ export function normalizeConfig(input: Config) {
     blockedSenderIds: senderIds(input.blockedSenderIds),
     maxConcurrentTopics: input.maxConcurrentTopics ?? 4,
     maxPendingMessages: input.maxPendingMessages ?? 256,
+    turnTimeoutMs: input.turnTimeoutMs ?? 0,
     eventStatePath: input.eventStatePath?.trim() || defaultAdmissionStatePath(),
     eventRetentionMs: input.eventRetentionMs ?? 604_800_000,
     enableUserAuth: input.enableUserAuth ?? true,

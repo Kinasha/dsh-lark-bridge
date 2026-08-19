@@ -23,3 +23,10 @@ test("plugin normalizes and deduplicates sender lists", () => {
   assert.deepEqual(config.allowedSenderIds, ["ou_allowed"]);
   assert.deepEqual(config.blockedSenderIds, ["ou_blocked"]);
 });
+
+test("turn timeout is disabled by default and rejects negative values", () => {
+  assert.equal(Config({}).turnTimeoutMs, 0);
+  assert.equal(Config({ turnTimeoutMs: 45_000 } as never).turnTimeoutMs, 45_000);
+  assert.equal(normalizeConfig({}).turnTimeoutMs, 0);
+  assert.throws(() => Config({ turnTimeoutMs: -1 } as never));
+});

@@ -182,6 +182,20 @@ test("DSH topic turn forwards cancellation to progress polling", async () => {
   assert.equal(client.waitOptions?.signal, controller.signal);
 });
 
+test("DSH topic turn forwards its configured timeout", async () => {
+  const client = new FakeDshClient();
+
+  await new DshTopicTurn(client).execute({
+    sessionId: "session-1",
+    workspaceId: "workspace-1",
+    title: "topic",
+    text: "question",
+    turnTimeoutMs: 45_000,
+  });
+
+  assert.equal(client.waitOptions?.timeoutMs, 45_000);
+});
+
 test("DSH topic turn does not prompt when shutdown happens during provisioning", async () => {
   const client = new FakeDshClient();
   const provisioning = deferred<EnsuredSession>();

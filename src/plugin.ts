@@ -332,6 +332,7 @@ export async function apply(ctx: Context, input: Config): Promise<void> {
         admission,
         maxConcurrentTopics: config.maxConcurrentTopics,
         maxPendingMessages: config.maxPendingMessages,
+        turnTimeoutMs: config.turnTimeoutMs,
         logger: semanticLogger,
         onReady,
       });

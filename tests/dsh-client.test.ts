@@ -164,3 +164,41 @@ test("DSH progress polling stops when its caller is cancelled", async () => {
 
   await assert.rejects(waiting, /cancelled by test/);
 });
+
+test("a zero timeout keeps polling until turn/end", async () => {
+  const client = new DshClient("http://127.0.0.1:1");
+  let calls = 0;
+  client.history = async () => {
+    calls += 1;
+    if (calls === 1) return [];
+    return [
+      {
+        type: "assistant/message",
+        seq: 1,
+        time: 1,
+        data: {
+          message: { content: [{ type: "text", text: "done" }] },
+        },
+      },
+      {
+        type: "turn/end",
+        seq: 2,
+        time: 2,
+        data: { reason: { kind: "completed" } },
+      },
+    ];
+  };
+
+  assert.deepEqual(
+    await client.waitForTurn("session-1", 0, {
+      pollMs: 1,
+      timeoutMs: 0,
+    }),
+    {
+      finalResponse: "done",
+      finishReason: "completed",
+      turnEndSeq: 2,
+    },
+  );
+  assert.ok(calls >= 2);
+});

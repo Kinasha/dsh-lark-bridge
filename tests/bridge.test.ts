@@ -21,6 +21,7 @@ import { LarkUserAuthorizationUnavailableError } from "../src/lark.js";
 
 class FakeDshClient implements DshBridgeClient {
   readonly sessionIds: string[] = [];
+  readonly waitOptions: Array<WaitForTurnOptions | undefined> = [];
   historyEvents: SessionEvent[] = [];
 
   ensureWorkspace(): Promise<WorkspaceView> {
@@ -63,6 +64,7 @@ class FakeDshClient implements DshBridgeClient {
     _afterSeq: number,
     options?: WaitForTurnOptions,
   ): Promise<CompletedTurn> {
+    this.waitOptions.push(options);
     await options?.onEvents?.([
       { type: "step/start", seq: 1, time: 1, data: { step: 1 } },
       {
@@ -279,6 +281,30 @@ test("a group message is handled only when it mentions the bot", async () => {
       topicRootMessageId: "group-message-mentioned",
     },
   ]);
+});
+
+test("the bridge forwards the configured turn timeout", async () => {
+  const client = new FakeDshClient();
+  const lark = new FakeLarkTransport([
+    {
+      eventId: "event-timeout",
+      messageId: "message-timeout",
+      chatId: "chat-1",
+      chatType: "p2p",
+      senderId: "user-1",
+      messageType: "text",
+      content: "long task",
+    },
+  ]);
+
+  await runBridge({
+    client,
+    lark,
+    workspacePath: "/project",
+    turnTimeoutMs: 45_000,
+  });
+
+  assert.equal(client.waitOptions[0]?.timeoutMs, 45_000);
 });
 
 test("messages sent from Web show progress in the linked Feishu topic", async () => {

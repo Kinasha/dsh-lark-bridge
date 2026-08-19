@@ -199,11 +199,11 @@ export async function waitForCompletedTurn(
   afterSeq: number,
   options: WaitForTurnOptions = {},
 ): Promise<CompletedTurn> {
-  const timeoutMs = options.timeoutMs ?? 300_000;
+  const timeoutMs = options.timeoutMs ?? 0;
   const pollMs = options.pollMs ?? 500;
-  const deadline = Date.now() + timeoutMs;
+  const deadline = timeoutMs > 0 ? Date.now() + timeoutMs : undefined;
   let deliveredSeq = afterSeq;
-  while (Date.now() < deadline) {
+  while (deadline === undefined || Date.now() < deadline) {
     if (options.signal?.aborted) throw abortReason(options.signal);
     const events = await historySince(
       history,

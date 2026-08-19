@@ -11,6 +11,7 @@ export interface DshTopicTurnInput {
   workspaceId: string;
   title: string;
   text: string;
+  turnTimeoutMs?: number;
   checkpoint?: PromptCheckpoint;
   signal?: AbortSignal;
   onPromptRequest?(rpcId: string): void;
@@ -61,6 +62,9 @@ export class DshTopicTurn {
       input.sessionId,
       beforeSeq,
       {
+        ...(input.turnTimeoutMs === undefined
+          ? {}
+          : { timeoutMs: input.turnTimeoutMs }),
         ...(input.signal === undefined ? {} : { signal: input.signal }),
         ...(input.onEvents === undefined ? {} : { onEvents: input.onEvents }),
         ...(input.onQuestion === undefined

@@ -520,3 +520,54 @@ test("rejects on timeout and on abort", async () => {
   controller.abort(new Error("stopped"));
   await assert.rejects(aborted, /stopped/);
 });
+
+test("a zero timeout waits for turn/end instead of expiring", async () => {
+  const controller = new AbortController();
+  const port: SessionEventSourcePort = {
+    events: {
+      mux: (_request, signal) => ({
+        async *[Symbol.asyncIterator]() {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          if (signal.aborted) return;
+          yield frame(
+            "s1",
+            event(1, "assistant/message", {
+              message: { content: [{ type: "text", text: "done" }] },
+            }),
+          );
+          yield frame(
+            "s1",
+            event(2, "turn/end", { reason: { kind: "completed" } }),
+          );
+        },
+      }),
+    },
+    respond: async () => ({ accepted: true }),
+  };
+  const stream = new SessionEventStream(port, {
+    sleep: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    },
+  });
+
+  const pending = waitForTurnFromStream({
+    stream,
+    history: async () => [],
+    completedTurnAfter,
+    sessionId: "s1",
+    afterSeq: 0,
+    timeoutMs: 0,
+  });
+  const running = stream.start(controller.signal);
+
+  try {
+    assert.deepEqual(await pending, {
+      finalResponse: "done",
+      finishReason: "completed",
+      turnEndSeq: 2,
+    });
+  } finally {
+    controller.abort();
+    await running;
+  }
+});

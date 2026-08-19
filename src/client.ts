@@ -27,7 +27,7 @@ const en = {
   discard: "Discard",
   reset: "Reset",
   overridden: "Overridden",
-  invalidNumber: "Enter a positive whole number.",
+  invalidNumber: "Enter a whole number within this setting's allowed range.",
   showSettings: "Show settings",
   hideSettings: "Hide settings",
   enabled: "Enable bridge",
@@ -38,6 +38,7 @@ const en = {
   listHint: "One sender open_id per line. The blocklist takes precedence.",
   maxConcurrentTopics: "Concurrent topics",
   maxPendingMessages: "Pending message limit",
+  turnTimeoutMs: "Turn timeout (ms; 0 disables)",
   eventStatePath: "Admission state file",
   eventRetentionMs: "Admission retention (ms)",
   enableUserAuth: "Enable Web user authorization",
@@ -93,7 +94,7 @@ const zh: typeof en = {
   discard: "放弃修改",
   reset: "重置",
   overridden: "已覆盖",
-  invalidNumber: "请输入正整数。",
+  invalidNumber: "请输入符合该设置范围的整数。",
   showSettings: "显示设置",
   hideSettings: "收起设置",
   enabled: "启用飞书桥接",
@@ -104,6 +105,7 @@ const zh: typeof en = {
   listHint: "每行填写一个 sender open_id；黑名单优先。",
   maxConcurrentTopics: "并行 Topic 数",
   maxPendingMessages: "待处理消息上限",
+  turnTimeoutMs: "Turn 总时长限制（毫秒，0 为不超时）",
   eventStatePath: "事件状态文件",
   eventRetentionMs: "事件保留时间（毫秒）",
   enableUserAuth: "启用 Web 用户身份授权",
@@ -178,7 +180,12 @@ export interface SchemaNode {
   dict?: Record<string, SchemaNode | number>;
   list?: Array<SchemaNode | number>;
   value?: unknown;
-  meta?: { default?: unknown; description?: unknown };
+  meta?: {
+    default?: unknown;
+    description?: unknown;
+    min?: number;
+    max?: number;
+  };
 }
 
 /** Resolves the `uid + refs` graph emitted by Schemastery `toJSON()`. */
@@ -277,6 +284,7 @@ const DEFAULTS: Config = {
   blockedSenderIds: [],
   maxConcurrentTopics: 4,
   maxPendingMessages: 256,
+  turnTimeoutMs: 0,
   eventRetentionMs: 604_800_000,
   enableUserAuth: true,
   domain: "feishu",
@@ -310,6 +318,7 @@ const FALLBACK_KINDS: Partial<Record<FieldName, FieldKind>> = {
   blockedSenderIds: "list",
   maxConcurrentTopics: "number",
   maxPendingMessages: "number",
+  turnTimeoutMs: "number",
   eventRetentionMs: "number",
 };
 
@@ -345,6 +354,7 @@ export const FIELDS: Array<{
   { name: "allowedSenderIds", label: "allowedSenderIds", wide: true },
   { name: "blockedSenderIds", label: "blockedSenderIds", wide: true },
   { name: "maxPendingMessages", label: "maxPendingMessages" },
+  { name: "turnTimeoutMs", label: "turnTimeoutMs" },
   { name: "eventRetentionMs", label: "eventRetentionMs" },
   { name: "eventStatePath", label: "eventStatePath", wide: true },
   { name: "enableUserAuth", label: "enableUserAuth", wide: true },
@@ -426,9 +436,17 @@ function parsedValue(name: FieldName, value: DraftValue): unknown {
   return text;
 }
 
-function positiveInteger(value: DraftValue | undefined): boolean {
+export function validInteger(
+  value: DraftValue | undefined,
+  schema: SchemaNode | undefined,
+): boolean {
   const number = Number(value);
-  return Number.isInteger(number) && number > 0;
+  if (!Number.isInteger(number)) return false;
+  const minimum = schema?.meta?.min;
+  const maximum = schema?.meta?.max;
+  if (minimum !== undefined && number < minimum) return false;
+  if (maximum !== undefined && number > maximum) return false;
+  return minimum !== undefined || number > 0;
 }
 
 async function readDescriptor(signal?: AbortSignal): Promise<Descriptor> {
@@ -512,7 +530,9 @@ function createSettingsCard(ctx: ClientContext) {
     const invalid = useMemo(
       () =>
         [...NUMBER_FIELDS].some(
-          (name) => dirty[name] === "set" && !positiveInteger(drafts[name]),
+          (name) =>
+            dirty[name] === "set" &&
+            !validInteger(drafts[name], schemaNodes?.[name]),
         ),
       [dirty, drafts],
     );
@@ -584,7 +604,10 @@ function createSettingsCard(ctx: ClientContext) {
           const isNumber = kind === "number";
           const options = kind === "select" ? selectOptions(schemaNodes?.[name]) : [];
           const inputId = `plugin-config-lark-${name}`;
-          const fieldInvalid = isNumber && dirty[name] === "set" && !positiveInteger(drafts[name]);
+          const fieldInvalid =
+            isNumber &&
+            dirty[name] === "set" &&
+            !validInteger(drafts[name], schemaNodes?.[name]);
           const overridden = dirty[name] === "set" ||
             (dirty[name] === undefined && Object.hasOwn(descriptor.user ?? {}, name));
           const common = {

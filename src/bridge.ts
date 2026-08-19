@@ -73,6 +73,8 @@ export interface BridgeOptions {
   admission?: EventAdmissionStore;
   maxConcurrentTopics?: number;
   maxPendingMessages?: number;
+  /** Maximum total duration of one DSH turn; 0 or undefined disables it. */
+  turnTimeoutMs?: number;
   logger?: BridgeLogger;
   onReady?(): void;
   /** Chooses and drives the reply tier; defaults to the plain post path. */
@@ -427,6 +429,9 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
                   message.content,
                   options.allowSlashCommands ?? false,
                 ),
+                ...(options.turnTimeoutMs === undefined
+                  ? {}
+                  : { turnTimeoutMs: options.turnTimeoutMs }),
                 signal,
                 onPromptRequest: (rpcId) => {
                   webSync.markBridgePrompt(rpcId);

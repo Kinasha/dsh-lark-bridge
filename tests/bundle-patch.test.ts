@@ -101,4 +101,5 @@ test("evaluating each expression yields a value the schema accepts", () => {
   assert.equal(resolved.enableApprovals, false, "approvals stay opt-in");
   assert.equal(resolved.allowSlashCommands, false);
   assert.equal(resolved.maxConcurrentTopics, 4);
+  assert.equal(resolved.turnTimeoutMs, 0);
 });

@@ -9,6 +9,7 @@ import {
   larkOpenPlatformUrl,
   schemaDictionary,
   selectOptions,
+  validInteger,
   type SchemaNode,
 } from "../src/client.js";
 import { Config } from "../src/lark-config.js";
@@ -80,6 +81,9 @@ test("field controls are derived from the real config schema, not a hand table",
   assert.deepEqual(selectOptions(dict.domain), ["feishu", "lark"]);
   assert.deepEqual(selectOptions(dict.replyMode), ["post", "card"]);
   assert.deepEqual(selectOptions(dict.enabled), []);
+  assert.equal(validInteger("0", dict.turnTimeoutMs), true);
+  assert.equal(validInteger("-1", dict.turnTimeoutMs), false);
+  assert.equal(validInteger("0", dict.maxConcurrentTopics), false);
 });
 
 test("field controls resolve the serialized Schemastery reference graph served by settings", () => {

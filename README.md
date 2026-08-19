@@ -214,6 +214,7 @@ Agent 知道 DSH Session 的准确 Workspace 路径；询问“你的工作区�
 | `DSH_LARK_BLOCKED_SENDERS` | `string` | 空 | `ou_bad_a,ou_bad_b` | 逗号分隔的 sender open ID blocklist；优先于 allowlist |
 | `DSH_LARK_MAX_CONCURRENT_TOPICS` | `number` | `4` | `8` | 不同话题可同时运行的最大 DSH Turn 数；同一话题始终串行 |
 | `DSH_LARK_MAX_PENDING_MESSAGES` | `number` | `256` | `128` | 传输和调度层允许保留的入站消息上限；超限时拒绝并等待上游重投 |
+| `DSH_LARK_TURN_TIMEOUT_MS` | `number` | `0` | `900000` | 单个 DSH Turn 的总时长保护；`0` 表示不超时，等待真实 `turn/end` 或服务关闭信号 |
 | `DSH_LARK_EVENT_STATE_PATH` | `string` | `$DSH_HOME/.dsh-lark-bridge/events.json` | `/secure/state/events.json` | admission checkpoint 与飞书话题关联文件；以 `0600` 原子写入 |
 | `DSH_LARK_EVENT_RETENTION_MS` | `number` | `604800000`（7 天） | `86400000` | 已回复事件去重记录的保留时间 |
 | `DSH_LARK_USER_AUTH_ENABLED` | `string` | `1` | `0` | 设为 `0` 时关闭 Web 用户身份授权，并始终使用引用格式降级 |

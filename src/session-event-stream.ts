@@ -469,7 +469,7 @@ export async function waitForTurnFromStream(input: {
     event: Extract<MuxEvent, { type: "approval/resolved" | "question/resolved" }>,
   ) => void | Promise<void>;
 }): Promise<CompletedTurnLike> {
-  const timeoutMs = input.timeoutMs ?? 300_000;
+  const timeoutMs = input.timeoutMs ?? 0;
   const presented = new Set(["step/start", "tool/call", "tool/result"]);
   const seen = new Map<number, SessionEvent>();
   let deliveredSeq = input.afterSeq;
@@ -478,14 +478,17 @@ export async function waitForTurnFromStream(input: {
     let settled = false;
     let work: Promise<void> = Promise.resolve();
 
-    const timer = setTimeout(() => {
-      finish(
-        undefined,
-        new Error(
-          `DSH session ${input.sessionId} did not finish within ${timeoutMs}ms`,
-        ),
-      );
-    }, timeoutMs);
+    const timer =
+      timeoutMs > 0
+        ? setTimeout(() => {
+            finish(
+              undefined,
+              new Error(
+                `DSH session ${input.sessionId} did not finish within ${timeoutMs}ms`,
+              ),
+            );
+          }, timeoutMs)
+        : undefined;
 
     const onAbort = (): void => {
       finish(undefined, input.signal?.reason ?? new Error("operation aborted"));
@@ -502,7 +505,7 @@ export async function waitForTurnFromStream(input: {
     function finish(value?: CompletedTurnLike, error?: unknown): void {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer !== undefined) clearTimeout(timer);
       input.signal?.removeEventListener("abort", onAbort);
       unsubscribe();
       if (error !== undefined) reject(error);
