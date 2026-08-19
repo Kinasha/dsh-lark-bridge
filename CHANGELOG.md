@@ -10,6 +10,9 @@
 
 ### Added
 
+- `progressSurface`（`DSH_LARK_PROGRESS_SURFACE`）：选择思维链形态。`cot`（默认）使用
+  飞书原生思维链，与 Web 侧呈现一致；`card` 在 CardKit 卡片内展示执行过程。属于展示类
+  设置，修改后立即用于新 Turn，不重建运行时。
 - CI 门禁扩展为 Node 22、24、26 三个版本的矩阵，覆盖率表写入运行摘要，并把打好的
   tarball 作为 artifact 上传。
 - `npm run check:repo`：校验 bundle patch、README 与 `.env.example` 的环境变量三方
@@ -25,6 +28,12 @@
 
 ### Changed
 
+- 思维链默认改用飞书原生 COT，CardKit 卡片作为回退；新建话题的第一个 Turn 仍使用卡片，
+  因为 COT 无法创建它要附着的话题。
+- COT 与卡片改为读取同一份 Turn 进度投影（`src/progress/turn-progress.ts`），两个表面的
+  工具标题、耗时与成败判定不再互相偏离。
+- 源码与测试按模块目录组织（`bridge/`、`card/`、`dsh/`、`html/`、`lark/`、`progress/`、
+  `settings/`、`standalone/`），`package.json` 的 `files` 相应改为按目录发布。
 - 测试改为递归发现 `tests/**/*.test.ts`（`scripts/run-tests.mjs`），不再受两层 glob
   限制；`npm run pack:check` 由 `npm run check:package` 取代。
 - 移除 `docs/` 目录；设计决策记录不再随仓库维护，历史内容可在 git 历史中查阅。
@@ -33,6 +42,16 @@
 
 ### Fixed
 
+- COT 事件读取补上嵌在 `message.content[]` 中的 `tool/result` 调用 id，工具不再一直显示
+  为执行中；Turn 结束时会关闭仍打开的工具。
+- 卡片层与 COT 层不再因一次打开失败就在本进程内停用，连续三次失败才停用；创建成功但
+  启动失败的 COT 会被正常结束，不再停留在加载态。
+- COT 写入：一批失败不再丢弃排在其后的批次，只对可重试的失败重试，积压有上限并在
+  `flush()` 时报告。
+- 只运行了工具、没有正文的 Turn 回退为状态文案：飞书拒绝空的 post 正文，此前会把已完成
+  的 Turn 变成失败。
+- Web 镜像：轮询失败按话题退避，反复失败的单个事件在三次尝试后放弃并推进游标，其后的
+  事件不再被永久阻塞；进度渲染与提问清理的失败不再拖垮整个 Turn。
 - 发布包补上 `dist/src/client.d.ts`：`exports["./client"]` 声明的类型入口此前不在
   `files` 中，安装后无法解析。
 
