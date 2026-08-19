@@ -1,13 +1,13 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { access, mkdir } from "node:fs/promises";
 import path from "node:path";
-import { DshClient } from "./dsh-client.js";
+import { DshClient } from "../dsh/client.js";
 import {
   DEFAULT_DSH_PORT,
   DSH_HOME,
   PROJECT_ROOT,
   WORKSPACE_PATH,
-} from "./config.js";
+} from "../config.js";
 
 const DSH_BINARY = path.join(PROJECT_ROOT, "node_modules", ".bin", "dsh");
 

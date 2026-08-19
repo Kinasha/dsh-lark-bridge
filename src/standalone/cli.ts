@@ -1,22 +1,22 @@
 #!/usr/bin/env node
 import path from "node:path";
 import { config as loadDotenv } from "dotenv";
-import { runBridge } from "./bridge.js";
-import { DEFAULT_DSH_PORT, DEFAULT_DSH_URL, PROJECT_ROOT } from "./config.js";
-import { ConsumerSupervisor } from "./consumer-supervisor.js";
-import { DshClient } from "./dsh-client.js";
+import { runBridge } from "../bridge/bridge.js";
+import { DEFAULT_DSH_PORT, DEFAULT_DSH_URL, PROJECT_ROOT } from "../config.js";
+import { ConsumerSupervisor } from "../bridge/consumer-supervisor.js";
+import { DshClient } from "../dsh/client.js";
 import {
   defaultAdmissionStatePath,
   EventAdmissionStore,
   JsonFileAdmissionAdapter,
-} from "./event-admission.js";
+} from "../bridge/event-admission.js";
 import { assertDshInstalled, DshWebHost, prepareDshHome } from "./host.js";
 import {
   assertLarkBotReady,
   LarkSdkTransport,
   resolveLarkCredentials,
   type LarkTransportLogger,
-} from "./lark.js";
+} from "../lark/transport.js";
 
 loadDotenv({
   path: path.join(PROJECT_ROOT, ".env"),
