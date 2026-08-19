@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   registerLarkUserAuthWeb,
   type LarkUserAuthWebPort,
-} from "../src/lark-user-auth-web.js";
+} from "../../src/lark/user-auth-web.js";
 
 test("the Web authorization entry validates OAuth state before accepting a code", async () => {
   const routes = new Map<

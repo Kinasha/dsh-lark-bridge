@@ -14,7 +14,7 @@
  */
 
 import type { Readable } from "node:stream";
-import { silentLogger, type SemanticLogger } from "./logger.js";
+import { silentLogger, type SemanticLogger } from "../logger.js";
 
 /** base64 inflates by 4/3, and DSH applies its own limits on top. */
 export const DEFAULT_MAX_IMAGE_BYTES = 5_000_000;

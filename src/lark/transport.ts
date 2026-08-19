@@ -11,12 +11,12 @@ import {
   type Logger as LarkSdkLogger,
   type RawMessageEvent,
 } from "@larksuiteoapi/node-sdk";
-import { LarkCotGateway, type CotMessage } from "./cot.js";
-import { renderLarkMarkdown } from "./lark-markdown.js";
-import type { LarkOAuthTokenApi } from "./lark-user-auth.js";
-import type { CardKitApiClientPort } from "./lark-cardkit.js";
-import type { LarkResourceDescriptor } from "./lark-resources.js";
-import { silentLogger, type SemanticLogger } from "./logger.js";
+import { LarkCotGateway, type CotMessage } from "../progress/cot.js";
+import { renderLarkMarkdown } from "./markdown.js";
+import type { LarkOAuthTokenApi } from "./user-auth.js";
+import type { CardKitApiClientPort } from "../card/cardkit.js";
+import type { LarkResourceDescriptor } from "./resources.js";
+import { silentLogger, type SemanticLogger } from "../logger.js";
 
 const DEFAULT_READINESS_TIMEOUT_MS = 30_000;
 const DEFAULT_READINESS_POLL_INTERVAL_MS = 100;

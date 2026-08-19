@@ -9,7 +9,7 @@ import {
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { LarkUserAccessTokenProvider } from "./lark.js";
+import type { LarkUserAccessTokenProvider } from "./transport.js";
 
 export const LARK_USER_AUTH_SCOPE =
   "im:message im:message.send_as_user offline_access";

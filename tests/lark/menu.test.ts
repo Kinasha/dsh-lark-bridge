@@ -6,7 +6,7 @@ import {
   decodeReactionEvent,
   menuCommand,
   reactionCommand,
-} from "../src/lark-menu.js";
+} from "../../src/lark/menu.js";
 
 test("decodes a bot menu event, converting its seconds stamp", () => {
   const decoded = decodeBotMenuEvent({

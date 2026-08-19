@@ -9,7 +9,7 @@ import {
   topicRootMessageId,
   type LarkApiClientPort,
   type LarkWsClientPort,
-} from "../src/lark.js";
+} from "../../src/lark/transport.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;

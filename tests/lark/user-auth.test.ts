@@ -6,7 +6,7 @@ import test from "node:test";
 import {
   JsonFileLarkUserAuthStore,
   LarkUserAuth,
-} from "../src/lark-user-auth.js";
+} from "../../src/lark/user-auth.js";
 
 test("OAuth authorization persists and refreshes the authorized user token", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "dsh-lark-auth-"));

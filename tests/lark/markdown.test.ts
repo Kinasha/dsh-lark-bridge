@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   renderLarkMarkdown,
   renderMermaidSvgForRasterization,
-} from "../src/lark-markdown.js";
+} from "../../src/lark/markdown.js";
 
 test("resolves Mermaid CSS colors before rasterization", () => {
   const svg = renderMermaidSvgForRasterization(`
